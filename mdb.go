@@ -11,3 +11,8 @@ defined in lmdb.h.  Other errno values like EINVAL will by of type
 syscall.Errno.
 */
 package mdb
+
+/*
+#cgo LDFLAGS: -llmdb
+*/
+import "C"

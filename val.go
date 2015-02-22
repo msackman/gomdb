@@ -1,12 +1,7 @@
 package mdb
 
 /*
-#cgo CFLAGS: -pthread -W -Wall -Wno-unused-parameter -Wbad-function-cast -O2 -g
-#cgo CFLAGS: -I/usr/local
-
-#include <stdlib.h>
-#include <stdio.h>
-#include "lmdb.h"
+#include <lmdb.h>
 */
 import "C"
 
