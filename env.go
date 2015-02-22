@@ -88,40 +88,40 @@ func Version() string {
 // A DB environment supports multiple databases, all residing in the
 // same shared-memory map.
 type Env struct {
-	_env *C.MDB_env
+	env *C.MDB_env
 }
 
 // Create an MDB environment handle.
 func NewEnv() (*Env, error) {
-	var _env *C.MDB_env
-	ret := C.mdb_env_create(&_env)
+	var env *C.MDB_env
+	ret := C.mdb_env_create(&env)
 	if ret != SUCCESS {
 		return nil, errno(ret)
 	}
-	return &Env{_env}, nil
+	return &Env{env}, nil
 }
 
 // Open an environment handle. If this function fails Close() must be called to discard the Env handle.
 func (env *Env) Open(path string, flags uint, mode uint) error {
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
-	ret := C.mdb_env_open(env._env, cpath, C.uint(NOTLS|flags), C.mdb_mode_t(mode))
+	ret := C.mdb_env_open(env.env, cpath, C.uint(NOTLS|flags), C.mdb_mode_t(mode))
 	return errno(ret)
 }
 
 func (env *Env) Close() error {
-	if env._env == nil {
+	if env.env == nil {
 		return errors.New("Environment already closed")
 	}
-	C.mdb_env_close(env._env)
-	env._env = nil
+	C.mdb_env_close(env.env)
+	env.env = nil
 	return nil
 }
 
 func (env *Env) Copy(path string) error {
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
-	ret := C.mdb_env_copy(env._env, cpath)
+	ret := C.mdb_env_copy(env.env, cpath)
 	return errno(ret)
 }
 
@@ -137,7 +137,7 @@ type Stat struct {
 
 func (env *Env) Stat() (*Stat, error) {
 	var _stat C.MDB_stat
-	ret := C.mdb_env_stat(env._env, &_stat)
+	ret := C.mdb_env_stat(env.env, &_stat)
 	if ret != SUCCESS {
 		return nil, errno(ret)
 	}
@@ -160,7 +160,7 @@ type Info struct {
 
 func (env *Env) Info() (*Info, error) {
 	var _info C.MDB_envinfo
-	ret := C.mdb_env_info(env._env, &_info)
+	ret := C.mdb_env_info(env.env, &_info)
 	if ret != SUCCESS {
 		return nil, errno(ret)
 	}
@@ -173,18 +173,18 @@ func (env *Env) Info() (*Info, error) {
 }
 
 func (env *Env) Sync(force int) error {
-	ret := C.mdb_env_sync(env._env, C.int(force))
+	ret := C.mdb_env_sync(env.env, C.int(force))
 	return errno(ret)
 }
 
 func (env *Env) SetFlags(flags uint, onoff int) error {
-	ret := C.mdb_env_set_flags(env._env, C.uint(flags), C.int(onoff))
+	ret := C.mdb_env_set_flags(env.env, C.uint(flags), C.int(onoff))
 	return errno(ret)
 }
 
 func (env *Env) Flags() (uint, error) {
 	var _flags C.uint
-	ret := C.mdb_env_get_flags(env._env, &_flags)
+	ret := C.mdb_env_get_flags(env.env, &_flags)
 	if ret != SUCCESS {
 		return 0, errno(ret)
 	}
@@ -195,7 +195,7 @@ func (env *Env) Path() (string, error) {
 	var path string
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
-	ret := C.mdb_env_get_path(env._env, &cpath)
+	ret := C.mdb_env_get_path(env.env, &cpath)
 	if ret != SUCCESS {
 		return "", errno(ret)
 	}
@@ -203,20 +203,20 @@ func (env *Env) Path() (string, error) {
 }
 
 func (env *Env) SetMapSize(size uint64) error {
-	ret := C.mdb_env_set_mapsize(env._env, C.size_t(size))
+	ret := C.mdb_env_set_mapsize(env.env, C.size_t(size))
 	return errno(ret)
 }
 
 func (env *Env) SetMaxReaders(size uint) error {
-	ret := C.mdb_env_set_maxreaders(env._env, C.uint(size))
+	ret := C.mdb_env_set_maxreaders(env.env, C.uint(size))
 	return errno(ret)
 }
 
 func (env *Env) SetMaxDBs(size DBI) error {
-	ret := C.mdb_env_set_maxdbs(env._env, C.MDB_dbi(size))
+	ret := C.mdb_env_set_maxdbs(env.env, C.MDB_dbi(size))
 	return errno(ret)
 }
 
 func (env *Env) DBIClose(dbi DBI) {
-	C.mdb_dbi_close(env._env, C.MDB_dbi(dbi))
+	C.mdb_dbi_close(env.env, C.MDB_dbi(dbi))
 }

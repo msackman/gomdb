@@ -32,17 +32,17 @@ const (
 )
 
 func (cursor *Cursor) Close() error {
-	if cursor._cursor == nil {
+	if cursor.cursor == nil {
 		return errors.New("Cursor already closed")
 	}
-	C.mdb_cursor_close(cursor._cursor)
-	cursor._cursor = nil
+	C.mdb_cursor_close(cursor.cursor)
+	cursor.cursor = nil
 	return nil
 }
 
 func (cursor *Cursor) Txn() *Txn {
 	var _txn *C.MDB_txn
-	_txn = C.mdb_cursor_txn(cursor._cursor)
+	_txn = C.mdb_cursor_txn(cursor.cursor)
 	if _txn != nil {
 		return &Txn{_txn}
 	}
@@ -51,13 +51,13 @@ func (cursor *Cursor) Txn() *Txn {
 
 func (cursor *Cursor) DBI() DBI {
 	var _dbi C.MDB_dbi
-	_dbi = C.mdb_cursor_dbi(cursor._cursor)
+	_dbi = C.mdb_cursor_dbi(cursor.cursor)
 	return DBI(_dbi)
 }
 
 // Retrieves the low-level MDB cursor.
 func (cursor *Cursor) MdbCursor() *C.MDB_cursor {
-	return cursor._cursor
+	return cursor.cursor
 }
 
 func (cursor *Cursor) Get(set_key, sval []byte, op uint) (key, val []byte, err error) {
@@ -71,25 +71,25 @@ func (cursor *Cursor) Get(set_key, sval []byte, op uint) (key, val []byte, err e
 func (cursor *Cursor) GetVal(key, val []byte, op uint) (Val, Val, error) {
 	ckey := Wrap(key)
 	cval := Wrap(val)
-	ret := C.mdb_cursor_get(cursor._cursor, (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval), C.MDB_cursor_op(op))
+	ret := C.mdb_cursor_get(cursor.cursor, (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval), C.MDB_cursor_op(op))
 	return ckey, cval, errno(ret)
 }
 
 func (cursor *Cursor) Put(key, val []byte, flags uint) error {
 	ckey := Wrap(key)
 	cval := Wrap(val)
-	ret := C.mdb_cursor_put(cursor._cursor, (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval), C.uint(flags))
+	ret := C.mdb_cursor_put(cursor.cursor, (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval), C.uint(flags))
 	return errno(ret)
 }
 
 func (cursor *Cursor) Del(flags uint) error {
-	ret := C.mdb_cursor_del(cursor._cursor, C.uint(flags))
+	ret := C.mdb_cursor_del(cursor.cursor, C.uint(flags))
 	return errno(ret)
 }
 
 func (cursor *Cursor) Count() (uint64, error) {
 	var _size C.size_t
-	ret := C.mdb_cursor_count(cursor._cursor, &_size)
+	ret := C.mdb_cursor_count(cursor.cursor, &_size)
 	if ret != SUCCESS {
 		return 0, errno(ret)
 	}

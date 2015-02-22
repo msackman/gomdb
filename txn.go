@@ -35,48 +35,48 @@ const (
 // All database operations require a transaction handle.
 // Transactions may be read-only or read-write.
 type Txn struct {
-	_txn *C.MDB_txn
+	txn *C.MDB_txn
 }
 
 func (env *Env) BeginTxn(parent *Txn, flags uint) (*Txn, error) {
-	var _txn *C.MDB_txn
+	var txn *C.MDB_txn
 	var ptxn *C.MDB_txn
 	if parent == nil {
 		ptxn = nil
 	} else {
-		ptxn = parent._txn
+		ptxn = parent.txn
 	}
-	ret := C.mdb_txn_begin(env._env, ptxn, C.uint(flags), &_txn)
+	ret := C.mdb_txn_begin(env.env, ptxn, C.uint(flags), &txn)
 	if ret != SUCCESS {
 		return nil, errno(ret)
 	}
-	return &Txn{_txn}, nil
+	return &Txn{txn}, nil
 }
 
 func (txn *Txn) Commit() error {
-	ret := C.mdb_txn_commit(txn._txn)
+	ret := C.mdb_txn_commit(txn.txn)
     // The transaction handle is freed if there was no error
     if ret == C.MDB_SUCCESS {
-        txn._txn = nil
+        txn.txn = nil
     }
 	return errno(ret)
 }
 
 func (txn *Txn) Abort() {
-	if txn._txn == nil {
+	if txn.txn == nil {
         return
     }
-    C.mdb_txn_abort(txn._txn)
+    C.mdb_txn_abort(txn.txn)
     // The transaction handle is always freed.
-	txn._txn = nil
+	txn.txn = nil
 }
 
 func (txn *Txn) Reset() {
-	C.mdb_txn_reset(txn._txn)
+	C.mdb_txn_reset(txn.txn)
 }
 
 func (txn *Txn) Renew() error {
-	ret := C.mdb_txn_renew(txn._txn)
+	ret := C.mdb_txn_renew(txn.txn)
 	return errno(ret)
 }
 
@@ -89,7 +89,7 @@ func (txn *Txn) DBIOpen(name *string, flags uint) (DBI, error) {
 		cname = C.CString(*name)
 		defer C.free(unsafe.Pointer(cname))
 	}
-	ret := C.mdb_dbi_open(txn._txn, cname, C.uint(flags), &_dbi)
+	ret := C.mdb_dbi_open(txn.txn, cname, C.uint(flags), &_dbi)
 	if ret != SUCCESS {
 		return DBI(math.NaN()), errno(ret)
 	}
@@ -98,7 +98,7 @@ func (txn *Txn) DBIOpen(name *string, flags uint) (DBI, error) {
 
 func (txn *Txn) Stat(dbi DBI) (*Stat, error) {
 	var _stat C.MDB_stat
-	ret := C.mdb_stat(txn._txn, C.MDB_dbi(dbi), &_stat)
+	ret := C.mdb_stat(txn.txn, C.MDB_dbi(dbi), &_stat)
 	if ret != SUCCESS {
 		return nil, errno(ret)
 	}
@@ -112,7 +112,7 @@ func (txn *Txn) Stat(dbi DBI) (*Stat, error) {
 }
 
 func (txn *Txn) Drop(dbi DBI, del int) error {
-	ret := C.mdb_drop(txn._txn, C.MDB_dbi(dbi), C.int(del))
+	ret := C.mdb_drop(txn.txn, C.MDB_dbi(dbi), C.int(del))
 	return errno(ret)
 }
 
@@ -127,43 +127,43 @@ func (txn *Txn) Get(dbi DBI, key []byte) ([]byte, error) {
 func (txn *Txn) GetVal(dbi DBI, key []byte) (Val, error) {
 	ckey := Wrap(key)
 	var cval Val
-	ret := C.mdb_get(txn._txn, C.MDB_dbi(dbi), (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval))
+	ret := C.mdb_get(txn.txn, C.MDB_dbi(dbi), (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval))
 	return cval, errno(ret)
 }
 
 func (txn *Txn) Put(dbi DBI, key []byte, val []byte, flags uint) error {
 	ckey := Wrap(key)
 	cval := Wrap(val)
-	ret := C.mdb_put(txn._txn, C.MDB_dbi(dbi), (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval), C.uint(flags))
+	ret := C.mdb_put(txn.txn, C.MDB_dbi(dbi), (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval), C.uint(flags))
 	return errno(ret)
 }
 
 func (txn *Txn) Del(dbi DBI, key, val []byte) error {
 	ckey := Wrap(key)
 	if val == nil {
-		ret := C.mdb_del(txn._txn, C.MDB_dbi(dbi), (*C.MDB_val)(&ckey), nil)
+		ret := C.mdb_del(txn.txn, C.MDB_dbi(dbi), (*C.MDB_val)(&ckey), nil)
 		return errno(ret)
 	}
 	cval := Wrap(val)
-	ret := C.mdb_del(txn._txn, C.MDB_dbi(dbi), (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval))
+	ret := C.mdb_del(txn.txn, C.MDB_dbi(dbi), (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval))
 	return errno(ret)
 }
 
 type Cursor struct {
-	_cursor *C.MDB_cursor
+	cursor *C.MDB_cursor
 }
 
 func (txn *Txn) CursorOpen(dbi DBI) (*Cursor, error) {
-	var _cursor *C.MDB_cursor
-	ret := C.mdb_cursor_open(txn._txn, C.MDB_dbi(dbi), &_cursor)
+	var cursor *C.MDB_cursor
+	ret := C.mdb_cursor_open(txn.txn, C.MDB_dbi(dbi), &cursor)
 	if ret != SUCCESS {
 		return nil, errno(ret)
 	}
-	return &Cursor{_cursor}, nil
+	return &Cursor{cursor}, nil
 }
 
 func (txn *Txn) CursorRenew(cursor *Cursor) error {
-	ret := C.mdb_cursor_renew(txn._txn, cursor._cursor)
+	ret := C.mdb_cursor_renew(txn.txn, cursor.cursor)
 	return errno(ret)
 }
 
@@ -176,7 +176,7 @@ func (txn *Txn) SetCompare(dbi DBI, cmp CmpFunc) error {
         gb := C.GoBytes(a.mv_data, C.int(a.mv_size))
         return C.int(cmp(ga, gb))
     }
-    ret := C.mdb_set_compare(txn._txn, C.MDB_dbi(dbi), *unsafe.Pointer(&f))
+    ret := C.mdb_set_compare(txn.txn, C.MDB_dbi(dbi), *unsafe.Pointer(&f))
     return errno(ret)
 }
 */
