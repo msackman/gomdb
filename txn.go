@@ -166,20 +166,3 @@ func (txn *Txn) CursorRenew(cursor *Cursor) error {
 	ret := C.mdb_cursor_renew(txn.txn, cursor.cursor)
 	return errno(ret)
 }
-
-/*
-type CmpFunc func(a, b []byte) int
-
-func (txn *Txn) SetCompare(dbi DBI, cmp CmpFunc) error {
-    f := func(a, b *C.MDB_val) C.int {
-        ga := C.GoBytes(a.mv_data, C.int(a.mv_size))
-        gb := C.GoBytes(a.mv_data, C.int(a.mv_size))
-        return C.int(cmp(ga, gb))
-    }
-    ret := C.mdb_set_compare(txn.txn, C.MDB_dbi(dbi), *unsafe.Pointer(&f))
-    return errno(ret)
-}
-*/
-// func (txn *Txn) SetDupSort(dbi DBI, comp *C.MDB_comp_func) error
-// func (txn *Txn) SetRelFunc(dbi DBI, rel *C.MDB_rel_func) error
-// func (txn *Txn) SetRelCtx(dbi DBI, void *) error
