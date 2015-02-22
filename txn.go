@@ -8,7 +8,6 @@ import "C"
 
 import (
 	"math"
-	"runtime"
 	"unsafe"
 )
 
@@ -47,12 +46,8 @@ func (env *Env) BeginTxn(parent *Txn, flags uint) (*Txn, error) {
 	} else {
 		ptxn = parent._txn
 	}
-	if flags&RDONLY == 0 {
-		runtime.LockOSThread()
-	}
 	ret := C.mdb_txn_begin(env._env, ptxn, C.uint(flags), &_txn)
 	if ret != SUCCESS {
-		runtime.UnlockOSThread()
 		return nil, errno(ret)
 	}
 	return &Txn{_txn}, nil
@@ -60,7 +55,6 @@ func (env *Env) BeginTxn(parent *Txn, flags uint) (*Txn, error) {
 
 func (txn *Txn) Commit() error {
 	ret := C.mdb_txn_commit(txn._txn)
-	runtime.UnlockOSThread()
     // The transaction handle is freed if there was no error
     if ret == C.MDB_SUCCESS {
         txn._txn = nil
@@ -73,7 +67,6 @@ func (txn *Txn) Abort() {
         return
     }
     C.mdb_txn_abort(txn._txn)
-	runtime.UnlockOSThread()
     // The transaction handle is always freed.
 	txn._txn = nil
 }
