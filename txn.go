@@ -29,6 +29,7 @@ const (
 	RESERVE     = C.MDB_RESERVE
 	APPEND      = C.MDB_APPEND
 	APPENDDUP   = C.MDB_APPENDDUP
+	CURRENT     = C.MDB_CURRENT
 )
 
 // Txn is Opaque structure for a transaction handle.
@@ -56,7 +57,7 @@ func (env *Env) BeginTxn(parent *Txn, flags uint) (*Txn, error) {
 func (txn *Txn) Commit() error {
 	ret := C.mdb_txn_commit(txn.txn)
 	// The transaction handle is freed if there was no error
-	if ret == C.MDB_SUCCESS {
+	if ret == SUCCESS {
 		txn.txn = nil
 	}
 	return errno(ret)

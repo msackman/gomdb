@@ -25,6 +25,7 @@ const (
 	WRITEMAP   = C.MDB_WRITEMAP   // use writable mmap
 	MAPASYNC   = C.MDB_MAPASYNC   // use asynchronous msync when MDB_WRITEMAP is use
 	NOTLS      = C.MDB_NOTLS      // tie reader locktable slots to Txn objects instead of threads
+	NORDAHEAD  = C.MDB_NORDAHEAD  // turn off readahead
 )
 
 type DBI uint
