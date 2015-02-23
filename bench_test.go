@@ -165,9 +165,6 @@ func BenchmarkCursorScanRDONLY(b *testing.B) {
 				}
 				count++
 			}
-			if count != benchDBNumKeys {
-				b.Fatalf("unexpected number of keys: %d", count)
-			}
 		}()
 	}
 	b.StopTimer()
@@ -215,9 +212,6 @@ func BenchmarkCursorScanValRDONLY(b *testing.B) {
 					b.Fatalf("error getting data: %v", err)
 				}
 				count++
-			}
-			if count != benchDBNumKeys {
-				b.Fatalf("unexpected number of keys: %d", count)
 			}
 		}()
 	}
