@@ -18,7 +18,7 @@ func TestServerPutGet(t *testing.T) {
 		One: &DBISettings{Flags: CREATE},
 	}
 
-	withDatabases(t, mydb, func(server *MDBServer) {
+	withMDBServer(t, mydb, func(server *MDBServer) {
 		key := "mykey"
 		val := "myval"
 		result := 42
@@ -41,7 +41,7 @@ func TestServerDatabasesDistict(t *testing.T) {
 		Two: &DBISettings{Flags: CREATE},
 	}
 
-	withDatabases(t, mydb, func(server *MDBServer) {
+	withMDBServer(t, mydb, func(server *MDBServer) {
 		key := "mykey"
 		val := "myval"
 		otherval := "myotherval"
@@ -65,7 +65,7 @@ func TestServerGetMissingDoesntKill(t *testing.T) {
 	mydb := &MyDatabases{
 		One: &DBISettings{Flags: CREATE},
 	}
-	withDatabases(t, mydb, func(server *MDBServer) {
+	withMDBServer(t, mydb, func(server *MDBServer) {
 		key := "mykey"
 		missingKey := "myotherkey"
 		val := "myval"
@@ -117,7 +117,7 @@ func expectFutureErrorFree(t *testing.T, future *TransactionFuture, msg string) 
 	}
 }
 
-func withDatabases(t *testing.T, i interface{}, testFun func(*MDBServer)) {
+func withMDBServer(t *testing.T, i interface{}, testFun func(*MDBServer)) {
 	path, err := ioutil.TempDir("/tmp", "mdb_test")
 	if err != nil {
 		t.Fatalf("Cannot create temporary directory")
