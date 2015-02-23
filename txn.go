@@ -55,19 +55,19 @@ func (env *Env) BeginTxn(parent *Txn, flags uint) (*Txn, error) {
 
 func (txn *Txn) Commit() error {
 	ret := C.mdb_txn_commit(txn.txn)
-    // The transaction handle is freed if there was no error
-    if ret == C.MDB_SUCCESS {
-        txn.txn = nil
-    }
+	// The transaction handle is freed if there was no error
+	if ret == C.MDB_SUCCESS {
+		txn.txn = nil
+	}
 	return errno(ret)
 }
 
 func (txn *Txn) Abort() {
 	if txn.txn == nil {
-        return
-    }
-    C.mdb_txn_abort(txn.txn)
-    // The transaction handle is always freed.
+		return
+	}
+	C.mdb_txn_abort(txn.txn)
+	// The transaction handle is always freed.
 	txn.txn = nil
 }
 
@@ -81,7 +81,7 @@ func (txn *Txn) Renew() error {
 }
 
 func (txn *Txn) DBIOpen(name *string, flags uint) (DBI, error) {
-	var _dbi C.MDB_dbi
+	var dbi C.MDB_dbi
 	var cname *C.char
 	if name == nil {
 		cname = nil
@@ -89,25 +89,25 @@ func (txn *Txn) DBIOpen(name *string, flags uint) (DBI, error) {
 		cname = C.CString(*name)
 		defer C.free(unsafe.Pointer(cname))
 	}
-	ret := C.mdb_dbi_open(txn.txn, cname, C.uint(flags), &_dbi)
+	ret := C.mdb_dbi_open(txn.txn, cname, C.uint(flags), &dbi)
 	if ret != SUCCESS {
 		return DBI(math.NaN()), errno(ret)
 	}
-	return DBI(_dbi), nil
+	return DBI(dbi), nil
 }
 
 func (txn *Txn) Stat(dbi DBI) (*Stat, error) {
-	var _stat C.MDB_stat
-	ret := C.mdb_stat(txn.txn, C.MDB_dbi(dbi), &_stat)
+	var c_stat C.MDB_stat
+	ret := C.mdb_stat(txn.txn, C.MDB_dbi(dbi), &c_stat)
 	if ret != SUCCESS {
 		return nil, errno(ret)
 	}
-	stat := Stat{PSize: uint(_stat.ms_psize),
-		Depth:         uint(_stat.ms_depth),
-		BranchPages:   uint64(_stat.ms_branch_pages),
-		LeafPages:     uint64(_stat.ms_leaf_pages),
-		OverflowPages: uint64(_stat.ms_overflow_pages),
-		Entries:       uint64(_stat.ms_entries)}
+	stat := Stat{PSize: uint(c_stat.ms_psize),
+		Depth:         uint(c_stat.ms_depth),
+		BranchPages:   uint64(c_stat.ms_branch_pages),
+		LeafPages:     uint64(c_stat.ms_leaf_pages),
+		OverflowPages: uint64(c_stat.ms_overflow_pages),
+		Entries:       uint64(c_stat.ms_entries)}
 	return &stat, nil
 }
 

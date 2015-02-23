@@ -41,18 +41,18 @@ func (cursor *Cursor) Close() error {
 }
 
 func (cursor *Cursor) Txn() *Txn {
-	var _txn *C.MDB_txn
-	_txn = C.mdb_cursor_txn(cursor.cursor)
-	if _txn != nil {
-		return &Txn{_txn}
+	var txn *C.MDB_txn
+	txn = C.mdb_cursor_txn(cursor.cursor)
+	if txn != nil {
+		return &Txn{txn}
 	}
 	return nil
 }
 
 func (cursor *Cursor) DBI() DBI {
-	var _dbi C.MDB_dbi
-	_dbi = C.mdb_cursor_dbi(cursor.cursor)
-	return DBI(_dbi)
+	var dbi C.MDB_dbi
+	dbi = C.mdb_cursor_dbi(cursor.cursor)
+	return DBI(dbi)
 }
 
 // Retrieves the low-level MDB cursor.
@@ -88,10 +88,10 @@ func (cursor *Cursor) Del(flags uint) error {
 }
 
 func (cursor *Cursor) Count() (uint64, error) {
-	var _size C.size_t
-	ret := C.mdb_cursor_count(cursor.cursor, &_size)
+	var size C.size_t
+	ret := C.mdb_cursor_count(cursor.cursor, &size)
 	if ret != SUCCESS {
 		return 0, errno(ret)
 	}
-	return uint64(_size), nil
+	return uint64(size), nil
 }

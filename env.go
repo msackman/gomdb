@@ -136,17 +136,17 @@ type Stat struct {
 }
 
 func (env *Env) Stat() (*Stat, error) {
-	var _stat C.MDB_stat
-	ret := C.mdb_env_stat(env.env, &_stat)
+	var c_stat C.MDB_stat
+	ret := C.mdb_env_stat(env.env, &c_stat)
 	if ret != SUCCESS {
 		return nil, errno(ret)
 	}
-	stat := Stat{PSize: uint(_stat.ms_psize),
-		Depth:         uint(_stat.ms_depth),
-		BranchPages:   uint64(_stat.ms_branch_pages),
-		LeafPages:     uint64(_stat.ms_leaf_pages),
-		OverflowPages: uint64(_stat.ms_overflow_pages),
-		Entries:       uint64(_stat.ms_entries)}
+	stat := Stat{PSize: uint(c_stat.ms_psize),
+		Depth:         uint(c_stat.ms_depth),
+		BranchPages:   uint64(c_stat.ms_branch_pages),
+		LeafPages:     uint64(c_stat.ms_leaf_pages),
+		OverflowPages: uint64(c_stat.ms_overflow_pages),
+		Entries:       uint64(c_stat.ms_entries)}
 	return &stat, nil
 }
 
@@ -159,16 +159,16 @@ type Info struct {
 }
 
 func (env *Env) Info() (*Info, error) {
-	var _info C.MDB_envinfo
-	ret := C.mdb_env_info(env.env, &_info)
+	var c_info C.MDB_envinfo
+	ret := C.mdb_env_info(env.env, &c_info)
 	if ret != SUCCESS {
 		return nil, errno(ret)
 	}
-	info := Info{MapSize: uint64(_info.me_mapsize),
-		LastPNO:    uint64(_info.me_last_pgno),
-		LastTxnID:  uint64(_info.me_last_txnid),
-		MaxReaders: uint(_info.me_maxreaders),
-		NumReaders: uint(_info.me_numreaders)}
+	info := Info{MapSize: uint64(c_info.me_mapsize),
+		LastPNO:    uint64(c_info.me_last_pgno),
+		LastTxnID:  uint64(c_info.me_last_txnid),
+		MaxReaders: uint(c_info.me_maxreaders),
+		NumReaders: uint(c_info.me_numreaders)}
 	return &info, nil
 }
 
@@ -183,12 +183,12 @@ func (env *Env) SetFlags(flags uint, onoff int) error {
 }
 
 func (env *Env) Flags() (uint, error) {
-	var _flags C.uint
-	ret := C.mdb_env_get_flags(env.env, &_flags)
+	var flags C.uint
+	ret := C.mdb_env_get_flags(env.env, &flags)
 	if ret != SUCCESS {
 		return 0, errno(ret)
 	}
-	return uint(_flags), nil
+	return uint(flags), nil
 }
 
 func (env *Env) Path() (string, error) {
