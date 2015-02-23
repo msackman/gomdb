@@ -4,18 +4,14 @@ gomdb
 Go wrapper for OpenLDAP Lightning Memory-Mapped Database (LMDB).
 Read more about LMDB here: http://symas.com/mdb/
 
-GoDoc available here: http://godoc.org/github.com/szferi/gomdb
+GoDoc available here: http://godoc.org/github.com/msackman/gomdb
 
 Build
 =======
 
-`go get github.com/szferi/gomdb`
+`go get github.com/msackman/gomdb`
 
-There is no dependency on LMDB dynamic library.
-
-On FreeBSD 10, you must explicitly set `CC` (otherwise it will fail with a cryptic error), for example:
-
-`CC=clang go test -v`
+You need to ensure you have installed lmdb yourself.
 
 TODO
 ======
