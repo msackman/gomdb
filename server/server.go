@@ -1,7 +1,8 @@
-package mdb
+package server
 
 import (
 	"errors"
+	mdb "github.com/msackman/gomdb"
 	"log"
 	"reflect"
 	"runtime"
@@ -12,14 +13,14 @@ type ReadWriteTransaction func(rwtxn *RWTxn) (interface{}, error)
 
 type DBISettings struct {
 	Flags uint
-	dbi   DBI
+	dbi   mdb.DBI
 }
 
 type MDBServer struct {
 	writerChan chan *mdbQuery
 	readerChan chan *mdbQuery
 	readers    []*mdbReader
-	env        *Env
+	env        *mdb.Env
 	rwtxn      *RWTxn
 }
 
@@ -139,7 +140,7 @@ func (server *MDBServer) actorLoop(path string, flags, mode uint, mapSize uint64
 }
 
 func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}) error {
-	env, err := NewEnv()
+	env, err := mdb.NewEnv()
 	if err != nil {
 		return err
 	}
@@ -157,7 +158,7 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 	}
 
 	if l := len(dbiMap); l != 0 {
-		if err = env.SetMaxDBs(DBI(l)); err != nil {
+		if err = env.SetMaxDBs(mdb.DBI(l)); err != nil {
 			return err
 		}
 	}
@@ -280,7 +281,7 @@ func (reader *mdbReader) actorLoop() {
 }
 
 func (reader *mdbReader) handleRunTxn(txnFunc ReadonlyTransaction, resultChan chan<- interface{}) error {
-	txn, err := reader.server.env.BeginTxn(nil, RDONLY)
+	txn, err := reader.server.env.BeginTxn(nil, mdb.RDONLY)
 	if err != nil {
 		resultChan <- nil
 		resultChan <- err
@@ -296,13 +297,13 @@ func (reader *mdbReader) handleRunTxn(txnFunc ReadonlyTransaction, resultChan ch
 }
 
 type RTxn struct {
-	txn *Txn
+	txn *mdb.Txn
 }
 
 func (rtxn *RTxn) Reset()                                           { rtxn.txn.Reset() }
 func (rtxn *RTxn) Renew() error                                     { return rtxn.txn.Renew() }
 func (rtxn *RTxn) Get(dbi *DBISettings, key []byte) ([]byte, error) { return rtxn.txn.Get(dbi.dbi, key) }
-func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (Val, error) {
+func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (mdb.Val, error) {
 	return rtxn.txn.GetVal(dbi.dbi, key)
 }
 

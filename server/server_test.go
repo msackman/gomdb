@@ -1,8 +1,9 @@
-package mdb
+package server
 
 import (
 	"bytes"
 	"fmt"
+	mdb "github.com/msackman/gomdb"
 	"io/ioutil"
 	"os"
 	"testing"
@@ -15,7 +16,7 @@ type MyDatabases struct {
 
 func TestServerPutGet(t *testing.T) {
 	mydb := &MyDatabases{
-		One: &DBISettings{Flags: CREATE},
+		One: &DBISettings{Flags: mdb.CREATE},
 	}
 
 	withMDBServer(t, mydb, func(server *MDBServer) {
@@ -37,8 +38,8 @@ func TestServerPutGet(t *testing.T) {
 
 func TestServerDatabasesDistict(t *testing.T) {
 	mydb := &MyDatabases{
-		One: &DBISettings{Flags: CREATE},
-		Two: &DBISettings{Flags: CREATE},
+		One: &DBISettings{Flags: mdb.CREATE},
+		Two: &DBISettings{Flags: mdb.CREATE},
 	}
 
 	withMDBServer(t, mydb, func(server *MDBServer) {
@@ -63,7 +64,7 @@ func TestServerDatabasesDistict(t *testing.T) {
 
 func TestServerGetMissingDoesntKill(t *testing.T) {
 	mydb := &MyDatabases{
-		One: &DBISettings{Flags: CREATE},
+		One: &DBISettings{Flags: mdb.CREATE},
 	}
 	withMDBServer(t, mydb, func(server *MDBServer) {
 		key := "mykey"
@@ -79,7 +80,7 @@ func TestServerGetMissingDoesntKill(t *testing.T) {
 			return rtxn.Get(mydb.One, []byte(missingKey))
 		})
 		future.Force()
-		if future.Error != NotFound {
+		if future.Error != mdb.NotFound {
 			t.Fatal("Was expecting NotFound error. Got:", future.Error)
 		}
 
@@ -128,7 +129,7 @@ func withMDBServer(t *testing.T, i interface{}, testFun func(*MDBServer)) {
 	}
 	defer os.RemoveAll(path)
 
-	server, err := NewMDBServer(path, WRITEMAP, 0600, 10485760, 1, i)
+	server, err := NewMDBServer(path, mdb.WRITEMAP, 0600, 10485760, 1, i)
 	if err != nil {
 		t.Fatalf("Cannot start server: %v", err)
 	}
