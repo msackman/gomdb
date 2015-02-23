@@ -104,14 +104,13 @@ func (server *MDBServer) actorLoop(path string, flags, mode uint, mapSize uint64
 			server.env.Close()
 		}
 	}()
-	err := server.init(path, flags, mode, mapSize, dbiStruct)
-	if err != nil {
+	if err := server.init(path, flags, mode, mapSize, dbiStruct); err != nil {
 		initResult <- err
 		return
 	}
-
 	initResult <- nil
 
+	var err error
 	terminate := false
 	for !terminate {
 		query := <-server.writerChan
