@@ -320,18 +320,20 @@ func (server *MDBServer) txnsComplete(err error) {
 }
 
 func (server *MDBServer) ensureTicker() {
-	ticker := time.NewTicker(server.txnDuration)
-	server.ticker = ticker
-	go func() {
-		query := &mdbQuery{code: queryCommit}
-		for {
-			_, ok := <-ticker.C
-			if !ok {
-				return
+	if server.ticker == nil {
+		ticker := time.NewTicker(server.txnDuration)
+		server.ticker = ticker
+		go func() {
+			query := &mdbQuery{code: queryCommit}
+			for {
+				_, ok := <-ticker.C
+				if !ok {
+					return
+				}
+				server.writerChan <- query
 			}
-			server.writerChan <- query
-		}
-	}()
+		}()
+	}
 }
 
 func (server *MDBServer) cancelTicker() {
@@ -342,8 +344,8 @@ func (server *MDBServer) cancelTicker() {
 }
 
 func (server *MDBServer) commitTxns() error {
+	server.cancelTicker()
 	if server.txn == nil {
-		server.cancelTicker()
 		return nil
 	} else {
 		err := server.txn.Commit()

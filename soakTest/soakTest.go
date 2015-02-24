@@ -23,7 +23,7 @@ const (
 	keySize   = 16
 	valSize   = 96
 	terabyte  = 1099511627776
-	openFlags = mdb.WRITEMAP // try |mdb.MAPASYNC for ludicrous speed
+	openFlags = mdb.WRITEMAP //| mdb.MAPASYNC // try |mdb.MAPASYNC for ludicrous speed
 )
 
 func main() {
