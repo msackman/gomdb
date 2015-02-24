@@ -271,7 +271,7 @@ func (server *MDBServer) calibrate() error {
 	if err = txn.Commit(); err != nil {
 		return err
 	}
-	server.txnDuration = time.Duration(float64(2*end.Sub(start).Nanoseconds()) / float64(count))
+	server.txnDuration = time.Duration(float64(5*end.Sub(start).Nanoseconds()) / float64(count))
 	return nil
 }
 
