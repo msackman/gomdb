@@ -23,7 +23,7 @@ type MDBServer struct {
 	readers     []*mdbReader
 	env         *mdb.Env
 	rwtxn       *RWTxn
-	batchedTxn  map[*readWriteTransactionFuture]bool
+	batchedTxn  []*readWriteTransactionFuture
 	txn         *mdb.Txn
 	ticker      *time.Ticker
 	txnDuration time.Duration
@@ -68,7 +68,7 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 		readerChan: readerChan,
 		readers:    make([]*mdbReader, numReaders),
 		rwtxn:      &RWTxn{},
-		batchedTxn: make(map[*readWriteTransactionFuture]bool),
+		batchedTxn: make([]*readWriteTransactionFuture, 0, defaultChanSize),
 	}
 	resultChan := make(chan error, 0)
 	go server.actor(path, openFlags, filemode, mapSize, dbiStruct, resultChan)
@@ -281,7 +281,7 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 			If the txn func itself errors, that kills the txns, but it doesn't kill us.
 	*/
 	var err error
-	server.batchedTxn[txnFuture] = true
+	server.batchedTxn = append(server.batchedTxn, txnFuture)
 	txn := server.txn
 	if txn == nil {
 		txn, err = server.env.BeginTxn(nil, 0)
@@ -312,11 +312,11 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 func (server *MDBServer) txnsComplete(err error) {
 	server.txn = nil
 	server.cancelTicker()
-	for txnFuture, _ := range server.batchedTxn {
+	for _, txnFuture := range server.batchedTxn {
 		txnFuture.error = err
 		txnFuture.syncChan <- nil
 	}
-	server.batchedTxn = make(map[*readWriteTransactionFuture]bool)
+	server.batchedTxn = server.batchedTxn[:0]
 }
 
 func (server *MDBServer) ensureTicker() {
