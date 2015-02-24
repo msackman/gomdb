@@ -23,13 +23,12 @@ func TestServerPutGet(t *testing.T) {
 		key := "mykey"
 		val := "myval"
 		result := 42
-		future := server.ReadWriteTransaction(func(rwtxn *RWTxn) (interface{}, error) {
+		future := server.ReadWriteTransaction(false, func(rwtxn *RWTxn) (interface{}, error) {
 			return result, rwtxn.Put(mydb.One, []byte(key), []byte(val), 0)
 		})
-		future.Force()
 		expectFutureErrorFree(t, future, "Unable to put value:")
-		if future.Result.(int) != result {
-			t.Fatal("Unexpected result received:", future.Result)
+		if future.Result().(int) != result {
+			t.Fatal("Unexpected result received:", future.Result())
 		}
 
 		getAndCheckValue(t, server, mydb.One, []byte(key), []byte(val))
@@ -46,7 +45,7 @@ func TestServerDatabasesDistict(t *testing.T) {
 		key := "mykey"
 		val := "myval"
 		otherval := "myotherval"
-		future := server.ReadWriteTransaction(func(rwtxn *RWTxn) (interface{}, error) {
+		future := server.ReadWriteTransaction(false, func(rwtxn *RWTxn) (interface{}, error) {
 			err := rwtxn.Put(mydb.One, []byte(key), []byte(val), 0)
 			if err != nil {
 				return nil, err
@@ -54,7 +53,6 @@ func TestServerDatabasesDistict(t *testing.T) {
 			err = rwtxn.Put(mydb.Two, []byte(key), []byte(otherval), 0)
 			return nil, err
 		})
-		future.Force()
 		expectFutureErrorFree(t, future, "Unable to put values:")
 
 		getAndCheckValue(t, server, mydb.One, []byte(key), []byte(val))
@@ -70,32 +68,29 @@ func TestServerGetMissingDoesntKill(t *testing.T) {
 		key := "mykey"
 		missingKey := "myotherkey"
 		val := "myval"
-		future := server.ReadWriteTransaction(func(rwtxn *RWTxn) (interface{}, error) {
+		future := server.ReadWriteTransaction(false, func(rwtxn *RWTxn) (interface{}, error) {
 			return nil, rwtxn.Put(mydb.One, []byte(key), []byte(val), 0)
 		})
-		future.Force()
 		expectFutureErrorFree(t, future, "Unable to put value:")
 
 		future = server.ReadonlyTransaction(func(rtxn *RTxn) (interface{}, error) {
 			return rtxn.Get(mydb.One, []byte(missingKey))
 		})
-		future.Force()
-		if future.Error != mdb.NotFound {
-			t.Fatal("Was expecting NotFound error. Got:", future.Error)
+		if future.Error() != mdb.NotFound {
+			t.Fatal("Was expecting NotFound error. Got:", future.Error())
 		}
 
 		future = server.ReadonlyTransaction(func(rtxn *RTxn) (interface{}, error) {
 			return rtxn.Get(mydb.One, []byte(key))
 		})
-		future.Force()
 		expectFutureErrorFree(t, future, "Unable to get value:")
-		if val != string(future.Result.([]byte)) {
-			t.Fatal("Unexpected result of get:", future.Result)
+		if val != string(future.Result().([]byte)) {
+			t.Fatal("Unexpected result of get:", future.Result())
 		}
 	})
 }
 
-func getAndCheckValue(t *testing.T, server *MDBServer, db *DBISettings, key, val []byte) *TransactionFuture {
+func getAndCheckValue(t *testing.T, server *MDBServer, db *DBISettings, key, val []byte) TransactionFuture {
 	future := server.ReadonlyTransaction(func(rtxn *RTxn) (interface{}, error) {
 		v, err := rtxn.Get(db, []byte(key))
 		if err != nil {
@@ -106,15 +101,13 @@ func getAndCheckValue(t *testing.T, server *MDBServer, db *DBISettings, key, val
 		}
 		return nil, nil
 	})
-	future.Force()
 	expectFutureErrorFree(t, future, "Unable to get value:")
 	return future
 }
 
-func expectFutureErrorFree(t *testing.T, future *TransactionFuture, msg string) {
-	future.Force() // it's idempotent anyway, so let's just be safe
-	if future.Error != nil {
-		t.Fatal(msg, future.Error)
+func expectFutureErrorFree(t *testing.T, future TransactionFuture, msg string) {
+	if future.Error() != nil {
+		t.Fatal(msg, future.Error())
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"log"
 	"reflect"
 	"runtime"
+	"time"
 )
 
 type ReadonlyTransaction func(rtxn *RTxn) (interface{}, error)
@@ -17,11 +18,16 @@ type DBISettings struct {
 }
 
 type MDBServer struct {
-	writerChan chan *mdbQuery
-	readerChan chan *mdbQuery
-	readers    []*mdbReader
-	env        *mdb.Env
-	rwtxn      *RWTxn
+	writerChan  chan *mdbQuery
+	readerChan  chan *mdbQuery
+	readers     []*mdbReader
+	env         *mdb.Env
+	rwtxn       *RWTxn
+	batchedTxn  map[*readWriteTransactionFuture]bool
+	txn         *mdb.Txn
+	ticker      *time.Ticker
+	txnDuration time.Duration
+	zeroDBI     mdb.DBI
 }
 
 type mdbReader struct {
@@ -31,14 +37,14 @@ type mdbReader struct {
 }
 
 type mdbQuery struct {
-	code       int
-	payload    interface{}
-	resultChan chan<- interface{}
+	code    int
+	payload interface{}
 }
 
 const (
 	queryShutdown = iota
 	queryRunTxn   = iota
+	queryCommit   = iota
 )
 
 const (
@@ -62,9 +68,10 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 		readerChan: readerChan,
 		readers:    make([]*mdbReader, numReaders),
 		rwtxn:      &RWTxn{},
+		batchedTxn: make(map[*readWriteTransactionFuture]bool),
 	}
 	resultChan := make(chan error, 0)
-	go server.actorLoop(path, openFlags, filemode, mapSize, dbiStruct, resultChan)
+	go server.actor(path, openFlags, filemode, mapSize, dbiStruct, resultChan)
 	result := <-resultChan
 	if result == nil {
 		return server, nil
@@ -73,12 +80,22 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 	}
 }
 
-func (mdb *MDBServer) ReadonlyTransaction(txn ReadonlyTransaction) *TransactionFuture {
-	return mdb.submitTransaction(txn, mdb.readerChan)
+func (mdb *MDBServer) ReadonlyTransaction(txn ReadonlyTransaction) TransactionFuture {
+	txnFuture := newReadonlyTransactionFuture(txn)
+	mdb.readerChan <- &mdbQuery{
+		code:    queryRunTxn,
+		payload: txnFuture,
+	}
+	return txnFuture
 }
 
-func (mdb *MDBServer) ReadWriteTransaction(txn ReadWriteTransaction) *TransactionFuture {
-	return mdb.submitTransaction(txn, mdb.writerChan)
+func (mdb *MDBServer) ReadWriteTransaction(forceCommit bool, txn ReadWriteTransaction) TransactionFuture {
+	txnFuture := newReadWriteTransactionFuture(txn, forceCommit)
+	mdb.writerChan <- &mdbQuery{
+		code:    queryRunTxn,
+		payload: txnFuture,
+	}
+	return txnFuture
 }
 
 func (mdb *MDBServer) Shutdown() {
@@ -87,18 +104,7 @@ func (mdb *MDBServer) Shutdown() {
 	}
 }
 
-func (mdb *MDBServer) submitTransaction(txn interface{}, queryChan chan<- *mdbQuery) *TransactionFuture {
-	c := make(chan interface{}, 2)
-	q := &mdbQuery{
-		code:       queryRunTxn,
-		payload:    txn,
-		resultChan: c,
-	}
-	queryChan <- q
-	return &TransactionFuture{resultChan: c}
-}
-
-func (server *MDBServer) actorLoop(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, initResult chan<- error) {
+func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, initResult chan<- error) {
 	runtime.LockOSThread()
 	defer func() {
 		if server.env != nil {
@@ -110,32 +116,58 @@ func (server *MDBServer) actorLoop(path string, flags, mode uint, mapSize uint64
 		return
 	}
 	initResult <- nil
+	server.actorLoop()
+}
 
+func (server *MDBServer) actorLoop() {
 	var err error
 	terminate := false
 	for !terminate {
-		query := <-server.writerChan
-		switch query.code {
-		case queryShutdown:
-			c := make(chan interface{}, 0)
-			shutdown := &mdbQuery{
-				code:       queryShutdown,
-				resultChan: c,
+		if server.txn == nil {
+			query := <-server.writerChan
+			terminate, err = server.handleQuery(query)
+		} else {
+			select {
+			case query := <-server.writerChan:
+				terminate, err = server.handleQuery(query)
+			default:
+				err = server.commitTxns()
 			}
-			for _, reader := range server.readers {
-				reader.queryChan <- shutdown
-				<-c // await death
-			}
-			terminate = true
-		case queryRunTxn:
-			err = server.handleRunTxn(query.payload.(ReadWriteTransaction), query.resultChan)
-		default:
-			err = UnexpectedMessage
 		}
 		terminate = terminate || err != nil
 	}
 	if err != nil {
 		log.Println(err)
+	}
+	if err = server.commitTxns(); err != nil {
+		log.Println(err)
+	}
+	server.handleShutdown()
+}
+
+func (server *MDBServer) handleQuery(query *mdbQuery) (terminate bool, err error) {
+	switch query.code {
+	case queryShutdown:
+		terminate = true
+	case queryRunTxn:
+		err = server.handleRunTxn(query.payload.(*readWriteTransactionFuture))
+	case queryCommit:
+		err = server.commitTxns()
+	default:
+		err = UnexpectedMessage
+	}
+	return
+}
+
+func (server *MDBServer) handleShutdown() {
+	c := make(chan interface{}, 0)
+	shutdown := &mdbQuery{
+		code:    queryShutdown,
+		payload: c,
+	}
+	for _, reader := range server.readers {
+		reader.queryChan <- shutdown
+		<-c // await death
 	}
 }
 
@@ -158,7 +190,7 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 	}
 
 	if l := len(dbiMap); l != 0 {
-		if err = env.SetMaxDBs(mdb.DBI(l)); err != nil {
+		if err = env.SetMaxDBs(1 + mdb.DBI(l)); err != nil {
 			return err
 		}
 	}
@@ -167,22 +199,30 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 	}
 	server.env = env
 
-	if l := len(dbiMap); l != 0 {
-		txn, err := env.BeginTxn(nil, 0)
+	txn, err := env.BeginTxn(nil, 0)
+	if err != nil {
+		return err
+	}
+	zeroDBI, err := txn.DBIOpen(nil, 0)
+	if err != nil {
+		txn.Abort()
+		return err
+	}
+	server.zeroDBI = zeroDBI
+	for name, value := range dbiMap {
+		dbi, err := txn.DBIOpen(&name, value.Flags)
 		if err != nil {
+			txn.Abort()
 			return err
 		}
-		for name, value := range dbiMap {
-			dbi, err := txn.DBIOpen(&name, value.Flags)
-			if err != nil {
-				txn.Abort()
-				return err
-			}
-			value.dbi = dbi
-		}
-		if err = txn.Commit(); err != nil {
-			return err
-		}
+		value.dbi = dbi
+	}
+	if err = txn.Commit(); err != nil {
+		return err
+	}
+
+	if err = server.calibrate(); err != nil {
+		return err
 	}
 
 	for idx := range server.readers {
@@ -197,25 +237,119 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 	return nil
 }
 
-func (server *MDBServer) handleRunTxn(txnFunc ReadWriteTransaction, resultChan chan<- interface{}) error {
+func (server *MDBServer) calibrate() error {
+	key := []byte("calibration")
+	value := []byte("  testing testing 1 2 3")
+	start := time.Now()
+	end := start
+	count := 0
+	hundredMillis := 100 * time.Millisecond
+	for count < 50 {
+		value[0] = byte(count)
+		txn, err := server.env.BeginTxn(nil, 0)
+		if txn.Put(server.zeroDBI, key, value, 0); err != nil {
+			txn.Abort()
+			return err
+		}
+		if err = txn.Commit(); err != nil {
+			return err
+		}
+		count++
+		end = time.Now()
+		if end.Sub(start) > hundredMillis {
+			break
+		}
+	}
 	txn, err := server.env.BeginTxn(nil, 0)
 	if err != nil {
-		resultChan <- nil
-		resultChan <- err
 		return err
+	}
+	if err = txn.Del(server.zeroDBI, key, nil); err != nil {
+		txn.Abort()
+		return err
+	}
+	if err = txn.Commit(); err != nil {
+		return err
+	}
+	server.txnDuration = time.Duration(float64(2*end.Sub(start).Nanoseconds()) / float64(count))
+	return nil
+}
+
+func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) error {
+	/*
+		If creating a txn, or commiting a txn errors, then that kills both the txns and us.
+			If the txn func itself errors, that kills the txns, but it doesn't kill us.
+	*/
+	var err error
+	server.batchedTxn[txnFuture] = true
+	txn := server.txn
+	if txn == nil {
+		txn, err = server.env.BeginTxn(nil, 0)
+		if err != nil {
+			server.txnsComplete(err)
+			return err
+		}
+		server.txn = txn
 	}
 	rwtxn := server.rwtxn
 	rwtxn.txn = txn
-	result, txnerr := txnFunc(rwtxn)
-	if txnerr == nil {
-		txnerr = txn.Commit()
-		err = txnerr
+	var txnErr error
+	txnFuture.result, txnErr = txnFuture.txn(rwtxn)
+	if txnErr == nil {
+		if txnFuture.forceCommit {
+			err = txn.Commit()
+			server.txnsComplete(err)
+		} else {
+			server.ensureTicker()
+		}
 	} else {
 		txn.Abort()
+		server.txnsComplete(txnErr)
 	}
-	resultChan <- result
-	resultChan <- txnerr
 	return err
+}
+
+func (server *MDBServer) txnsComplete(err error) {
+	server.txn = nil
+	server.cancelTicker()
+	for txnFuture, _ := range server.batchedTxn {
+		txnFuture.error = err
+		txnFuture.syncChan <- nil
+	}
+	server.batchedTxn = make(map[*readWriteTransactionFuture]bool)
+}
+
+func (server *MDBServer) ensureTicker() {
+	ticker := time.NewTicker(server.txnDuration)
+	server.ticker = ticker
+	go func() {
+		query := &mdbQuery{code: queryCommit}
+		for {
+			_, ok := <-ticker.C
+			if !ok {
+				return
+			}
+			server.writerChan <- query
+		}
+	}()
+}
+
+func (server *MDBServer) cancelTicker() {
+	if server.ticker != nil {
+		server.ticker.Stop()
+		server.ticker = nil
+	}
+}
+
+func (server *MDBServer) commitTxns() error {
+	if server.txn == nil {
+		server.cancelTicker()
+		return nil
+	} else {
+		err := server.txn.Commit()
+		server.txnsComplete(err)
+		return err
+	}
 }
 
 func analyzeDbiStruct(dbiStruct interface{}) (map[string]*DBISettings, error) {
@@ -260,7 +394,7 @@ func (reader *mdbReader) actorLoop() {
 		case direct := <-reader.queryChan:
 			switch direct.code {
 			case queryShutdown:
-				direct.resultChan <- nil
+				direct.payload.(chan interface{}) <- nil
 				terminate = true
 			default:
 				err = UnexpectedMessage
@@ -268,7 +402,7 @@ func (reader *mdbReader) actorLoop() {
 		case txn := <-txnChan:
 			switch txn.code {
 			case queryRunTxn:
-				err = reader.handleRunTxn(txn.payload.(ReadonlyTransaction), txn.resultChan)
+				err = reader.handleRunTxn(txn.payload.(*readonlyTransactionFuture))
 			default:
 				err = UnexpectedMessage
 			}
@@ -280,19 +414,18 @@ func (reader *mdbReader) actorLoop() {
 	}
 }
 
-func (reader *mdbReader) handleRunTxn(txnFunc ReadonlyTransaction, resultChan chan<- interface{}) error {
+func (reader *mdbReader) handleRunTxn(txnFuture *readonlyTransactionFuture) error {
 	txn, err := reader.server.env.BeginTxn(nil, mdb.RDONLY)
 	if err != nil {
-		resultChan <- nil
-		resultChan <- err
+		txnFuture.error = err
+		txnFuture.syncChan <- nil
 		return err
 	}
 	rtxn := reader.rtxn
 	rtxn.txn = txn
-	result, err := txnFunc(rtxn)
-	resultChan <- result
-	resultChan <- err
+	txnFuture.result, txnFuture.error = txnFuture.txn(rtxn)
 	txn.Abort()
+	txnFuture.syncChan <- nil
 	return nil
 }
 
@@ -319,20 +452,62 @@ func (rwtxn *RWTxn) Del(dbi *DBISettings, key, val []byte) error {
 	return rwtxn.txn.Del(dbi.dbi, key, val)
 }
 
-type TransactionFuture struct {
-	Result     interface{}
-	Error      error
-	resultChan <-chan interface{}
+type TransactionFuture interface {
+	Force() TransactionFuture
+	Result() interface{}
+	Error() error
 }
 
-func (tf *TransactionFuture) Force() *TransactionFuture {
-	if tf.resultChan != nil {
-		tf.Result = <-tf.resultChan
-		err := <-tf.resultChan
-		if err != nil {
-			tf.Error = err.(error)
-		}
-		tf.resultChan = nil
+type plainTransactionFuture struct {
+	result   interface{}
+	error    error
+	syncChan chan interface{}
+}
+
+func (tf *plainTransactionFuture) Force() TransactionFuture {
+	if tf.syncChan != nil {
+		<-tf.syncChan
+		tf.syncChan = nil
 	}
 	return tf
+}
+
+func (tf *plainTransactionFuture) Result() interface{} {
+	tf.Force()
+	return tf.result
+}
+
+func (tf *plainTransactionFuture) Error() error {
+	tf.Force()
+	return tf.error
+}
+
+type readonlyTransactionFuture struct {
+	plainTransactionFuture
+	txn ReadonlyTransaction
+}
+
+type readWriteTransactionFuture struct {
+	plainTransactionFuture
+	txn         ReadWriteTransaction
+	forceCommit bool
+}
+
+func newPlainTransactionFuture() plainTransactionFuture {
+	return plainTransactionFuture{syncChan: make(chan interface{}, 1)}
+}
+
+func newReadonlyTransactionFuture(txn ReadonlyTransaction) *readonlyTransactionFuture {
+	return &readonlyTransactionFuture{
+		plainTransactionFuture: newPlainTransactionFuture(),
+		txn: txn,
+	}
+}
+
+func newReadWriteTransactionFuture(txn ReadWriteTransaction, forceCommit bool) *readWriteTransactionFuture {
+	return &readWriteTransactionFuture{
+		plainTransactionFuture: newPlainTransactionFuture(),
+		txn:         txn,
+		forceCommit: forceCommit,
+	}
 }
