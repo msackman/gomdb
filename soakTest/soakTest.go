@@ -61,9 +61,9 @@ func main() {
 	log.Println("Using dir", dir)
 
 	dbs := &DBs{
-		Test: &mdbs.DBISettings{Flags: mdb.CREATE},
+		Test: &mdbs.DBISettings{Flags: mdb.CREATE | mdb.INTEGERKEY},
 	}
-	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, terabyte, readers, dbs)
+	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, terabyte, 0, dbs)
 	if err != nil {
 		log.Fatal("Cannot start server:", err)
 	}
@@ -146,11 +146,11 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 					keyNum := rand.Int63n(records)
 					key := make([]byte, keySize)
 					int64ToBytes(keyNum, key)
-					val, err1 := txn.Get(dbs.Test, key)
+					val, err1 := txn.GetVal(dbs.Test, key)
 					if err1 != nil {
 						return nil, err1
 					}
-					num := bytesToInt64(val)
+					num := bytesToInt64(val.BytesNoCopy())
 					if num < keyNum {
 						return nil, fmt.Errorf("Expected val (%v) >= key (%v)", num, keyNum)
 					}
