@@ -18,8 +18,8 @@ type DBISettings struct {
 }
 
 type MDBServer struct {
-	writerChan  chan *mdbQuery
-	readerChan  chan *mdbQuery
+	writerChan  chan mdbQuery
+	readerChan  chan mdbQuery
 	readers     []*mdbReader
 	env         *mdb.Env
 	rwtxn       *RWTxn
@@ -31,32 +31,39 @@ type MDBServer struct {
 }
 
 type mdbReader struct {
-	queryChan chan *mdbQuery
+	queryChan chan mdbQuery
 	server    *MDBServer
 	rtxn      *RTxn
 }
 
-type mdbQuery struct {
-	code    int
-	payload interface{}
+type mdbQuery interface {
+	mdbQueryWitness()
 }
 
-const (
-	queryShutdown = iota
-	queryRunTxn   = iota
-	queryCommit   = iota
-)
+type queryShutdown struct {
+	shutdownChan chan interface{}
+}
+type queryCommit struct{}
+
+func (qs *queryShutdown) mdbQueryWitness()                {}
+func (qc *queryCommit) mdbQueryWitness()                  {}
+func (rotf *readonlyTransactionFuture) mdbQueryWitness()  {}
+func (rwtf *readWriteTransactionFuture) mdbQueryWitness() {}
 
 const (
 	defaultChanSize = 64
 )
 
-var NotAStructPointer = errors.New("Not a pointer to a struct")
-var UnexpectedMessage = errors.New("Unexpected message")
+var (
+	NotAStructPointer = errors.New("Not a pointer to a struct")
+	UnexpectedMessage = errors.New("Unexpected message")
+	shutdownQuery     = &queryShutdown{}
+	commitQuery       = &queryCommit{}
+)
 
 func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, dbiStruct interface{}) (*MDBServer, error) {
-	writerChan := make(chan *mdbQuery, defaultChanSize)
-	readerChan := make(chan *mdbQuery, defaultChanSize)
+	writerChan := make(chan mdbQuery, defaultChanSize)
+	readerChan := make(chan mdbQuery, defaultChanSize)
 	if numReaders < 1 {
 		numReaders = runtime.GOMAXPROCS(0) / 2 // with 0, just returns current value
 		if numReaders < 1 {
@@ -82,26 +89,19 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 
 func (mdb *MDBServer) ReadonlyTransaction(txn ReadonlyTransaction) TransactionFuture {
 	txnFuture := newReadonlyTransactionFuture(txn)
-	mdb.readerChan <- &mdbQuery{
-		code:    queryRunTxn,
-		payload: txnFuture,
-	}
+	mdb.readerChan <- txnFuture
 	return txnFuture
 }
 
 func (mdb *MDBServer) ReadWriteTransaction(forceCommit bool, txn ReadWriteTransaction) TransactionFuture {
 	txnFuture := newReadWriteTransactionFuture(txn, forceCommit)
-	mdb.writerChan <- &mdbQuery{
-		code:    queryRunTxn,
-		payload: txnFuture,
-	}
+	mdb.writerChan <- txnFuture
 	return txnFuture
 }
 
+// Note: currently async.
 func (mdb *MDBServer) Shutdown() {
-	mdb.writerChan <- &mdbQuery{
-		code: queryShutdown,
-	}
+	mdb.writerChan <- shutdownQuery
 }
 
 func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, initResult chan<- error) {
@@ -145,13 +145,13 @@ func (server *MDBServer) actorLoop() {
 	server.handleShutdown()
 }
 
-func (server *MDBServer) handleQuery(query *mdbQuery) (terminate bool, err error) {
-	switch query.code {
-	case queryShutdown:
+func (server *MDBServer) handleQuery(query mdbQuery) (terminate bool, err error) {
+	switch msg := query.(type) {
+	case *queryShutdown:
 		terminate = true
-	case queryRunTxn:
-		err = server.handleRunTxn(query.payload.(*readWriteTransactionFuture))
-	case queryCommit:
+	case *readWriteTransactionFuture:
+		err = server.handleRunTxn(msg)
+	case *queryCommit:
 		err = server.commitTxns()
 	default:
 		err = UnexpectedMessage
@@ -161,9 +161,8 @@ func (server *MDBServer) handleQuery(query *mdbQuery) (terminate bool, err error
 
 func (server *MDBServer) handleShutdown() {
 	c := make(chan interface{}, 0)
-	shutdown := &mdbQuery{
-		code:    queryShutdown,
-		payload: c,
+	shutdown := &queryShutdown{
+		shutdownChan: c,
 	}
 	for _, reader := range server.readers {
 		reader.queryChan <- shutdown
@@ -227,7 +226,7 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 
 	for idx := range server.readers {
 		reader := &mdbReader{
-			queryChan: make(chan *mdbQuery, defaultChanSize),
+			queryChan: make(chan mdbQuery, defaultChanSize),
 			server:    server,
 			rtxn:      &RTxn{},
 		}
@@ -324,13 +323,12 @@ func (server *MDBServer) ensureTicker() {
 		ticker := time.NewTicker(server.txnDuration)
 		server.ticker = ticker
 		go func() {
-			query := &mdbQuery{code: queryCommit}
 			for {
 				_, ok := <-ticker.C
 				if !ok {
 					return
 				}
-				server.writerChan <- query
+				server.writerChan <- commitQuery
 			}
 		}()
 	}
@@ -394,17 +392,17 @@ func (reader *mdbReader) actorLoop() {
 	for !terminate {
 		select {
 		case direct := <-reader.queryChan:
-			switch direct.code {
-			case queryShutdown:
-				direct.payload.(chan interface{}) <- nil
+			switch query := direct.(type) {
+			case *queryShutdown:
+				query.shutdownChan <- nil
 				terminate = true
 			default:
 				err = UnexpectedMessage
 			}
-		case txn := <-txnChan:
-			switch txn.code {
-			case queryRunTxn:
-				err = reader.handleRunTxn(txn.payload.(*readonlyTransactionFuture))
+		case query := <-txnChan:
+			switch msg := query.(type) {
+			case *readonlyTransactionFuture:
+				err = reader.handleRunTxn(msg)
 			default:
 				err = UnexpectedMessage
 			}
