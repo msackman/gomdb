@@ -20,6 +20,7 @@ type DBISettings struct {
 type MDBServer struct {
 	writerChan  chan mdbQuery
 	readerChan  chan mdbQuery
+	terminated  chan struct{}
 	readers     []*mdbReader
 	env         *mdb.Env
 	rwtxn       *RWTxn
@@ -41,7 +42,7 @@ type mdbQuery interface {
 }
 
 type queryShutdown struct {
-	shutdownChan chan interface{}
+	signal chan struct{}
 }
 type queryCommit struct{}
 
@@ -73,6 +74,7 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 	server := &MDBServer{
 		writerChan: writerChan,
 		readerChan: readerChan,
+		terminated: make(chan struct{}),
 		readers:    make([]*mdbReader, numReaders),
 		rwtxn:      &RWTxn{},
 		batchedTxn: make([]*readWriteTransactionFuture, 0, defaultChanSize),
@@ -89,19 +91,30 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 
 func (mdb *MDBServer) ReadonlyTransaction(txn ReadonlyTransaction) TransactionFuture {
 	txnFuture := newReadonlyTransactionFuture(txn)
-	mdb.readerChan <- txnFuture
-	return txnFuture
+	select {
+	case mdb.readerChan <- txnFuture:
+		return txnFuture
+	case <-mdb.terminated:
+		return nil
+	}
 }
 
 func (mdb *MDBServer) ReadWriteTransaction(forceCommit bool, txn ReadWriteTransaction) TransactionFuture {
 	txnFuture := newReadWriteTransactionFuture(txn, forceCommit)
-	mdb.writerChan <- txnFuture
-	return txnFuture
+	select {
+	case mdb.writerChan <- txnFuture:
+		return txnFuture
+	case <-mdb.terminated:
+		return nil
+	}
 }
 
 // Note: currently async.
 func (mdb *MDBServer) Shutdown() {
-	mdb.writerChan <- shutdownQuery
+	select {
+	case mdb.writerChan <- shutdownQuery:
+	case <-mdb.terminated:
+	}
 }
 
 func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, initResult chan<- error) {
@@ -115,7 +128,7 @@ func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, db
 		initResult <- err
 		return
 	}
-	initResult <- nil
+	close(initResult)
 	server.actorLoop()
 }
 
@@ -136,6 +149,7 @@ func (server *MDBServer) actorLoop() {
 		}
 		terminate = terminate || err != nil
 	}
+	close(server.terminated)
 	if err != nil {
 		log.Println(err)
 	}
@@ -160,10 +174,8 @@ func (server *MDBServer) handleQuery(query mdbQuery) (terminate bool, err error)
 }
 
 func (server *MDBServer) handleShutdown() {
-	c := make(chan interface{}, 0)
-	shutdown := &queryShutdown{
-		shutdownChan: c,
-	}
+	c := make(chan struct{})
+	shutdown := &queryShutdown{signal: c}
 	for _, reader := range server.readers {
 		reader.queryChan <- shutdown
 		<-c // await death
@@ -313,7 +325,7 @@ func (server *MDBServer) txnsComplete(err error) {
 	server.cancelTicker()
 	for _, txnFuture := range server.batchedTxn {
 		txnFuture.error = err
-		txnFuture.syncChan <- nil
+		close(txnFuture.signal)
 	}
 	server.batchedTxn = server.batchedTxn[:0]
 }
@@ -394,7 +406,7 @@ func (reader *mdbReader) actorLoop() {
 		case direct := <-reader.queryChan:
 			switch query := direct.(type) {
 			case *queryShutdown:
-				query.shutdownChan <- nil
+				close(query.signal)
 				terminate = true
 			default:
 				err = UnexpectedMessage
@@ -415,17 +427,16 @@ func (reader *mdbReader) actorLoop() {
 }
 
 func (reader *mdbReader) handleRunTxn(txnFuture *readonlyTransactionFuture) error {
+	defer close(txnFuture.signal)
 	txn, err := reader.server.env.BeginTxn(nil, mdb.RDONLY)
 	if err != nil {
 		txnFuture.error = err
-		txnFuture.syncChan <- nil
 		return err
 	}
 	rtxn := reader.rtxn
 	rtxn.txn = txn
 	txnFuture.result, txnFuture.error = txnFuture.txn(rtxn)
 	txn.Abort()
-	txnFuture.syncChan <- nil
 	return nil
 }
 
@@ -459,16 +470,13 @@ type TransactionFuture interface {
 }
 
 type plainTransactionFuture struct {
-	result   interface{}
-	error    error
-	syncChan chan interface{}
+	result interface{}
+	error  error
+	signal chan struct{}
 }
 
 func (tf *plainTransactionFuture) Force() TransactionFuture {
-	if tf.syncChan != nil {
-		<-tf.syncChan
-		tf.syncChan = nil
-	}
+	<-tf.signal
 	return tf
 }
 
@@ -494,7 +502,7 @@ type readWriteTransactionFuture struct {
 }
 
 func newPlainTransactionFuture() plainTransactionFuture {
-	return plainTransactionFuture{syncChan: make(chan interface{}, 1)}
+	return plainTransactionFuture{signal: make(chan struct{})}
 }
 
 func newReadonlyTransactionFuture(txn ReadonlyTransaction) *readonlyTransactionFuture {
