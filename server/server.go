@@ -465,8 +465,7 @@ func (rwtxn *RWTxn) Del(dbi *DBISettings, key, val []byte) error {
 
 type TransactionFuture interface {
 	Force() TransactionFuture
-	Result() interface{}
-	Error() error
+	ResultError() (interface{}, error)
 }
 
 type plainTransactionFuture struct {
@@ -480,14 +479,9 @@ func (tf *plainTransactionFuture) Force() TransactionFuture {
 	return tf
 }
 
-func (tf *plainTransactionFuture) Result() interface{} {
+func (tf *plainTransactionFuture) ResultError() (interface{}, error) {
 	tf.Force()
-	return tf.result
-}
-
-func (tf *plainTransactionFuture) Error() error {
-	tf.Force()
-	return tf.error
+	return tf.result, tf.error
 }
 
 type readonlyTransactionFuture struct {

@@ -94,7 +94,7 @@ func main() {
 func populate(records int, server *mdbs.MDBServer, dbs *DBs) error {
 	key := make([]byte, keySize)
 	val := make([]byte, valSize)
-	return server.ReadWriteTransaction(false, func(txn *mdbs.RWTxn) (interface{}, error) {
+	_, err := server.ReadWriteTransaction(false, func(txn *mdbs.RWTxn) (interface{}, error) {
 		for idx := 0; idx < records; idx++ {
 			int64ToBytes(int64(idx), key)
 			int64ToBytes(int64(idx), val)
@@ -103,7 +103,8 @@ func populate(records int, server *mdbs.MDBServer, dbs *DBs) error {
 			}
 		}
 		return nil, nil
-	}).Error()
+	}).ResultError()
+	return err
 }
 
 func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, write bool) error {
@@ -126,7 +127,7 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 			count = 0
 		default:
 			if write {
-				err = server.ReadWriteTransaction(true, func(txn *mdbs.RWTxn) (interface{}, error) {
+				_, err = server.ReadWriteTransaction(true, func(txn *mdbs.RWTxn) (interface{}, error) {
 					keyNum := rand.Int63n(records)
 					key := make([]byte, keySize)
 					int64ToBytes(keyNum, key)
@@ -140,9 +141,9 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 					}
 					int64ToBytes(num+1, val)
 					return nil, txn.Put(dbs.Test, key, val, 0)
-				}).Error()
+				}).ResultError()
 			} else {
-				err = server.ReadonlyTransaction(func(txn *mdbs.RTxn) (interface{}, error) {
+				_, err = server.ReadonlyTransaction(func(txn *mdbs.RTxn) (interface{}, error) {
 					keyNum := rand.Int63n(records)
 					key := make([]byte, keySize)
 					int64ToBytes(keyNum, key)
@@ -155,7 +156,7 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 						return nil, fmt.Errorf("Expected val (%v) >= key (%v)", num, keyNum)
 					}
 					return nil, nil
-				}).Error()
+				}).ResultError()
 			}
 			if err != nil {
 				log.Fatal(err)
