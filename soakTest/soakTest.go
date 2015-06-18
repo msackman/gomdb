@@ -63,7 +63,7 @@ func main() {
 	dbs := &DBs{
 		Test: &mdbs.DBISettings{Flags: mdb.CREATE | mdb.INTEGERKEY},
 	}
-	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, terabyte, 0, dbs)
+	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, terabyte, 4, dbs)
 	if err != nil {
 		log.Fatal("Cannot start server:", err)
 	}

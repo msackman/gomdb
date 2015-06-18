@@ -6,6 +6,7 @@ import (
 	"log"
 	"reflect"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -41,12 +42,12 @@ type mdbQuery interface {
 	mdbQueryWitness()
 }
 
-type queryShutdown struct {
-	signal chan struct{}
-}
+type queryShutdown struct{}
+type queryInternalShutdown sync.WaitGroup
 type queryCommit struct{}
 
 func (qs *queryShutdown) mdbQueryWitness()                {}
+func (qis *queryInternalShutdown) mdbQueryWitness()       {}
 func (qc *queryCommit) mdbQueryWitness()                  {}
 func (rotf *readonlyTransactionFuture) mdbQueryWitness()  {}
 func (rwtf *readWriteTransactionFuture) mdbQueryWitness() {}
@@ -90,29 +91,27 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 }
 
 func (mdb *MDBServer) ReadonlyTransaction(txn ReadonlyTransaction) TransactionFuture {
-	txnFuture := newReadonlyTransactionFuture(txn)
+	txnFuture := newReadonlyTransactionFuture(txn, mdb)
 	select {
 	case mdb.readerChan <- txnFuture:
-		return txnFuture
 	case <-mdb.terminated:
-		return nil
 	}
+	return txnFuture
 }
 
 func (mdb *MDBServer) ReadWriteTransaction(forceCommit bool, txn ReadWriteTransaction) TransactionFuture {
-	txnFuture := newReadWriteTransactionFuture(txn, forceCommit)
+	txnFuture := newReadWriteTransactionFuture(txn, forceCommit, mdb)
 	select {
 	case mdb.writerChan <- txnFuture:
-		return txnFuture
 	case <-mdb.terminated:
-		return nil
 	}
+	return txnFuture
 }
 
-// Note: currently async.
 func (mdb *MDBServer) Shutdown() {
 	select {
 	case mdb.writerChan <- shutdownQuery:
+		<-mdb.terminated
 	case <-mdb.terminated:
 	}
 }
@@ -149,7 +148,6 @@ func (server *MDBServer) actorLoop() {
 		}
 		terminate = terminate || err != nil
 	}
-	close(server.terminated)
 	if err != nil {
 		log.Println(err)
 	}
@@ -157,6 +155,7 @@ func (server *MDBServer) actorLoop() {
 		log.Println(err)
 	}
 	server.handleShutdown()
+	close(server.terminated)
 }
 
 func (server *MDBServer) handleQuery(query mdbQuery) (terminate bool, err error) {
@@ -174,12 +173,13 @@ func (server *MDBServer) handleQuery(query mdbQuery) (terminate bool, err error)
 }
 
 func (server *MDBServer) handleShutdown() {
-	c := make(chan struct{})
-	shutdown := &queryShutdown{signal: c}
+	wg := new(sync.WaitGroup)
+	wg.Add(len(server.readers))
+	is := (*queryInternalShutdown)(wg)
 	for _, reader := range server.readers {
-		reader.queryChan <- shutdown
-		<-c // await death
+		reader.queryChan <- is
 	}
+	wg.Wait()
 }
 
 func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}) error {
@@ -405,8 +405,8 @@ func (reader *mdbReader) actorLoop() {
 		select {
 		case direct := <-reader.queryChan:
 			switch query := direct.(type) {
-			case *queryShutdown:
-				close(query.signal)
+			case *queryInternalShutdown:
+				((*sync.WaitGroup)(query)).Done()
 				terminate = true
 			default:
 				err = UnexpectedMessage
@@ -469,13 +469,17 @@ type TransactionFuture interface {
 }
 
 type plainTransactionFuture struct {
-	result interface{}
-	error  error
-	signal chan struct{}
+	result     interface{}
+	error      error
+	signal     chan struct{}
+	terminated chan struct{}
 }
 
 func (tf *plainTransactionFuture) Force() TransactionFuture {
-	<-tf.signal
+	select {
+	case <-tf.signal:
+	case <-tf.terminated:
+	}
 	return tf
 }
 
@@ -495,20 +499,23 @@ type readWriteTransactionFuture struct {
 	forceCommit bool
 }
 
-func newPlainTransactionFuture() plainTransactionFuture {
-	return plainTransactionFuture{signal: make(chan struct{})}
+func newPlainTransactionFuture(mdb *MDBServer) plainTransactionFuture {
+	return plainTransactionFuture{
+		signal:     make(chan struct{}),
+		terminated: mdb.terminated,
+	}
 }
 
-func newReadonlyTransactionFuture(txn ReadonlyTransaction) *readonlyTransactionFuture {
+func newReadonlyTransactionFuture(txn ReadonlyTransaction, mdb *MDBServer) *readonlyTransactionFuture {
 	return &readonlyTransactionFuture{
-		plainTransactionFuture: newPlainTransactionFuture(),
+		plainTransactionFuture: newPlainTransactionFuture(mdb),
 		txn: txn,
 	}
 }
 
-func newReadWriteTransactionFuture(txn ReadWriteTransaction, forceCommit bool) *readWriteTransactionFuture {
+func newReadWriteTransactionFuture(txn ReadWriteTransaction, forceCommit bool, mdb *MDBServer) *readWriteTransactionFuture {
 	return &readWriteTransactionFuture{
-		plainTransactionFuture: newPlainTransactionFuture(),
+		plainTransactionFuture: newPlainTransactionFuture(mdb),
 		txn:         txn,
 		forceCommit: forceCommit,
 	}

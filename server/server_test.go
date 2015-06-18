@@ -27,8 +27,8 @@ func TestServerPutGet(t *testing.T) {
 			return result, rwtxn.Put(mydb.One, []byte(key), []byte(val), 0)
 		})
 		expectFutureErrorFree(t, future, "Unable to put value:")
-		if future.Result().(int) != result {
-			t.Fatal("Unexpected result received:", future.Result())
+		if res, _ := future.ResultError(); res.(int) != result {
+			t.Fatal("Unexpected result received:", res)
 		}
 
 		getAndCheckValue(t, server, mydb.One, []byte(key), []byte(val))
@@ -76,16 +76,16 @@ func TestServerGetMissingDoesntKill(t *testing.T) {
 		future = server.ReadonlyTransaction(func(rtxn *RTxn) (interface{}, error) {
 			return rtxn.Get(mydb.One, []byte(missingKey))
 		})
-		if future.Error() != mdb.NotFound {
-			t.Fatal("Was expecting NotFound error. Got:", future.Error())
+		if _, err := future.ResultError(); err != mdb.NotFound {
+			t.Fatal("Was expecting NotFound error. Got:", err)
 		}
 
 		future = server.ReadonlyTransaction(func(rtxn *RTxn) (interface{}, error) {
 			return rtxn.Get(mydb.One, []byte(key))
 		})
 		expectFutureErrorFree(t, future, "Unable to get value:")
-		if val != string(future.Result().([]byte)) {
-			t.Fatal("Unexpected result of get:", future.Result())
+		if res, _ := future.ResultError(); val != string(res.([]byte)) {
+			t.Fatal("Unexpected result of get:", res)
 		}
 	})
 }
@@ -106,8 +106,8 @@ func getAndCheckValue(t *testing.T, server *MDBServer, db *DBISettings, key, val
 }
 
 func expectFutureErrorFree(t *testing.T, future TransactionFuture, msg string) {
-	if future.Error() != nil {
-		t.Fatal(msg, future.Error())
+	if _, err := future.ResultError(); err != nil {
+		t.Fatal(msg, err)
 	}
 }
 
