@@ -44,11 +44,9 @@ type mdbQuery interface {
 
 type queryShutdown struct{}
 type queryInternalShutdown sync.WaitGroup
-type queryCommit struct{}
 
 func (qs *queryShutdown) mdbQueryWitness()                {}
 func (qis *queryInternalShutdown) mdbQueryWitness()       {}
-func (qc *queryCommit) mdbQueryWitness()                  {}
 func (rotf *readonlyTransactionFuture) mdbQueryWitness()  {}
 func (rwtf *readWriteTransactionFuture) mdbQueryWitness() {}
 
@@ -60,7 +58,6 @@ var (
 	NotAStructPointer = errors.New("Not a pointer to a struct")
 	UnexpectedMessage = errors.New("Unexpected message")
 	shutdownQuery     = &queryShutdown{}
-	commitQuery       = &queryCommit{}
 )
 
 func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, dbiStruct interface{}) (*MDBServer, error) {
@@ -142,6 +139,8 @@ func (server *MDBServer) actorLoop() {
 			select {
 			case query := <-server.writerChan:
 				terminate, err = server.handleQuery(query)
+			case <-server.ticker.C:
+				err = server.commitTxns()
 			default:
 				err = server.commitTxns()
 			}
@@ -164,8 +163,6 @@ func (server *MDBServer) handleQuery(query mdbQuery) (terminate bool, err error)
 		terminate = true
 	case *readWriteTransactionFuture:
 		err = server.handleRunTxn(msg)
-	case *queryCommit:
-		err = server.commitTxns()
 	default:
 		err = UnexpectedMessage
 	}
@@ -308,8 +305,7 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 	txnFuture.result, txnErr = txnFuture.txn(rwtxn)
 	if txnErr == nil {
 		if txnFuture.forceCommit {
-			err = txn.Commit()
-			server.txnsComplete(err)
+			server.commitTxns()
 		} else {
 			server.ensureTicker()
 		}
@@ -334,15 +330,6 @@ func (server *MDBServer) ensureTicker() {
 	if server.ticker == nil {
 		ticker := time.NewTicker(server.txnDuration)
 		server.ticker = ticker
-		go func() {
-			for {
-				_, ok := <-ticker.C
-				if !ok {
-					return
-				}
-				server.writerChan <- commitQuery
-			}
-		}()
 	}
 }
 
@@ -354,7 +341,6 @@ func (server *MDBServer) cancelTicker() {
 }
 
 func (server *MDBServer) commitTxns() error {
-	server.cancelTicker()
 	if server.txn == nil {
 		return nil
 	} else {

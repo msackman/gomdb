@@ -63,7 +63,7 @@ func main() {
 	dbs := &DBs{
 		Test: &mdbs.DBISettings{Flags: mdb.CREATE | mdb.INTEGERKEY},
 	}
-	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, terabyte, 4, dbs)
+	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, terabyte, 0, dbs)
 	if err != nil {
 		log.Fatal("Cannot start server:", err)
 	}
@@ -115,6 +115,7 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 	start := time.Now()
 	count := 0
 	ticker := time.NewTicker(time.Duration(readers) * time.Second)
+	randSource := rand.New(rand.NewSource(time.Now().UnixNano()))
 	var err error
 	for {
 		select {
@@ -127,10 +128,11 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 			count = 0
 		default:
 			if write {
-				_, err = server.ReadWriteTransaction(true, func(txn *mdbs.RWTxn) (interface{}, error) {
-					keyNum := rand.Int63n(records)
-					key := make([]byte, keySize)
-					int64ToBytes(keyNum, key)
+				keyNum := randSource.Int63n(records)
+				key := make([]byte, keySize)
+				int64ToBytes(keyNum, key)
+				forceFlush := keyNum%10 == 0
+				future := server.ReadWriteTransaction(forceFlush, func(txn *mdbs.RWTxn) (interface{}, error) {
 					val, err1 := txn.Get(dbs.Test, key)
 					if err1 != nil {
 						return nil, err1
@@ -141,12 +143,15 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 					}
 					int64ToBytes(num+1, val)
 					return nil, txn.Put(dbs.Test, key, val, 0)
-				}).ResultError()
+				})
+				if forceFlush {
+					_, err = future.ResultError()
+				}
 			} else {
+				keyNum := randSource.Int63n(records)
+				key := make([]byte, keySize)
+				int64ToBytes(keyNum, key)
 				_, err = server.ReadonlyTransaction(func(txn *mdbs.RTxn) (interface{}, error) {
-					keyNum := rand.Int63n(records)
-					key := make([]byte, keySize)
-					int64ToBytes(keyNum, key)
 					val, err1 := txn.GetVal(dbs.Test, key)
 					if err1 != nil {
 						return nil, err1
