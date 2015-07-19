@@ -436,6 +436,14 @@ func (rtxn *RTxn) Get(dbi *DBISettings, key []byte) ([]byte, error) { return rtx
 func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (mdb.Val, error) {
 	return rtxn.txn.GetVal(dbi.dbi, key)
 }
+func (rtxn *RTxn) WithCursor(dbi *DBISettings, fun func(cursor *mdb.Cursor) (interface{}, error)) (interface{}, error) {
+	cursor, err := rtxn.txn.CursorOpen(dbi.dbi)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close()
+	return fun(cursor)
+}
 
 type RWTxn struct {
 	RTxn
