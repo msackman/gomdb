@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 	"testing"
+	"time"
 )
 
 type MyDatabases struct {
@@ -122,7 +123,7 @@ func withMDBServer(t *testing.T, i interface{}, testFun func(*MDBServer)) {
 	}
 	defer os.RemoveAll(path)
 
-	server, err := NewMDBServer(path, mdb.WRITEMAP, 0600, 10485760, 1, i)
+	server, err := NewMDBServer(path, mdb.WRITEMAP, 0600, 10485760, 1, time.Millisecond, i)
 	if err != nil {
 		t.Fatalf("Cannot start server: %v", err)
 	}

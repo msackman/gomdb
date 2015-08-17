@@ -29,7 +29,6 @@ type MDBServer struct {
 	txn         *mdb.Txn
 	ticker      *time.Ticker
 	txnDuration time.Duration
-	zeroDBI     mdb.DBI
 }
 
 type mdbReader struct {
@@ -60,7 +59,7 @@ var (
 	shutdownQuery     = &queryShutdown{}
 )
 
-func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, dbiStruct interface{}) (*MDBServer, error) {
+func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, commitLatency time.Duration, dbiStruct interface{}) (*MDBServer, error) {
 	writerChan := make(chan mdbQuery, defaultChanSize)
 	readerChan := make(chan mdbQuery, defaultChanSize)
 	if numReaders < 1 {
@@ -70,12 +69,13 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 		}
 	}
 	server := &MDBServer{
-		writerChan: writerChan,
-		readerChan: readerChan,
-		terminated: make(chan struct{}),
-		readers:    make([]*mdbReader, numReaders),
-		rwtxn:      &RWTxn{},
-		batchedTxn: make([]*readWriteTransactionFuture, 0, defaultChanSize),
+		writerChan:  writerChan,
+		readerChan:  readerChan,
+		terminated:  make(chan struct{}),
+		readers:     make([]*mdbReader, numReaders),
+		rwtxn:       &RWTxn{},
+		batchedTxn:  make([]*readWriteTransactionFuture, 0, defaultChanSize),
+		txnDuration: commitLatency,
 	}
 	resultChan := make(chan error, 0)
 	go server.actor(path, openFlags, filemode, mapSize, dbiStruct, resultChan)
@@ -198,7 +198,7 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 	}
 
 	if l := len(dbiMap); l != 0 {
-		if err = env.SetMaxDBs(1 + mdb.DBI(l)); err != nil {
+		if err = env.SetMaxDBs(mdb.DBI(l)); err != nil {
 			return err
 		}
 	}
@@ -211,12 +211,6 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 	if err != nil {
 		return err
 	}
-	zeroDBI, err := txn.DBIOpen(nil, 0)
-	if err != nil {
-		txn.Abort()
-		return err
-	}
-	server.zeroDBI = zeroDBI
 	for name, value := range dbiMap {
 		dbi, err := txn.DBIOpen(&name, value.Flags)
 		if err != nil {
@@ -229,10 +223,6 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 		return err
 	}
 
-	if err = server.calibrate(); err != nil {
-		return err
-	}
-
 	for idx := range server.readers {
 		reader := &mdbReader{
 			queryChan: make(chan mdbQuery, defaultChanSize),
@@ -242,44 +232,6 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 		server.readers[idx] = reader
 		go reader.actorLoop()
 	}
-	return nil
-}
-
-func (server *MDBServer) calibrate() error {
-	key := []byte("calibration")
-	value := []byte("  testing testing 1 2 3")
-	start := time.Now()
-	end := start
-	count := 0
-	hundredMillis := 100 * time.Millisecond
-	for count < 50 {
-		value[0] = byte(count)
-		txn, err := server.env.BeginTxn(nil, 0)
-		if txn.Put(server.zeroDBI, key, value, 0); err != nil {
-			txn.Abort()
-			return err
-		}
-		if err = txn.Commit(); err != nil {
-			return err
-		}
-		count++
-		end = time.Now()
-		if end.Sub(start) > hundredMillis {
-			break
-		}
-	}
-	txn, err := server.env.BeginTxn(nil, 0)
-	if err != nil {
-		return err
-	}
-	if err = txn.Del(server.zeroDBI, key, nil); err != nil {
-		txn.Abort()
-		return err
-	}
-	if err = txn.Commit(); err != nil {
-		return err
-	}
-	server.txnDuration = time.Duration(float64(5*end.Sub(start).Nanoseconds()) / float64(count))
 	return nil
 }
 
@@ -302,12 +254,13 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 	rwtxn := server.rwtxn
 	rwtxn.txn = txn
 	var txnErr error
+	if !txnFuture.forceCommit {
+		server.ensureTicker()
+	}
 	txnFuture.result, txnErr = txnFuture.txn(rwtxn)
 	if txnErr == nil {
 		if txnFuture.forceCommit {
 			server.commitTxns()
-		} else {
-			server.ensureTicker()
 		}
 	} else {
 		txn.Abort()
@@ -318,11 +271,11 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 
 func (server *MDBServer) txnsComplete(err error) {
 	server.txn = nil
-	server.cancelTicker()
 	for _, txnFuture := range server.batchedTxn {
 		txnFuture.error = err
 		close(txnFuture.signal)
 	}
+	server.cancelTicker()
 	server.batchedTxn = server.batchedTxn[:0]
 }
 
