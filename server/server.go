@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	cc "github.com/msackman/chancell"
 	mdb "github.com/msackman/gomdb"
 	"log"
 	"reflect"
@@ -19,22 +20,24 @@ type DBISettings struct {
 }
 
 type MDBServer struct {
-	writerChan  chan mdbQuery
-	readerChan  chan mdbQuery
-	terminated  chan struct{}
-	readers     []*mdbReader
-	env         *mdb.Env
-	rwtxn       *RWTxn
-	batchedTxn  []*readWriteTransactionFuture
-	txn         *mdb.Txn
-	ticker      *time.Ticker
-	txnDuration time.Duration
+	writerCellTail          *cc.ChanCellTail
+	writerEnqueueQueryInner func(mdbQuery, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
+	writerChan              <-chan mdbQuery
+	readerCellTail          *cc.ChanCellTail
+	readerEnqueueQueryInner func(mdbQuery, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
+	readerChan              <-chan mdbQuery
+	readers                 []*mdbReader
+	env                     *mdb.Env
+	rwtxn                   *RWTxn
+	batchedTxn              []*readWriteTransactionFuture
+	txn                     *mdb.Txn
+	ticker                  *time.Ticker
+	txnDuration             time.Duration
 }
 
 type mdbReader struct {
-	queryChan chan mdbQuery
-	server    *MDBServer
-	rtxn      *RTxn
+	server *MDBServer
+	rtxn   *RTxn
 }
 
 type mdbQuery interface {
@@ -49,19 +52,14 @@ func (qis *queryInternalShutdown) mdbQueryWitness()       {}
 func (rotf *readonlyTransactionFuture) mdbQueryWitness()  {}
 func (rwtf *readWriteTransactionFuture) mdbQueryWitness() {}
 
-const (
-	defaultChanSize = 64
-)
-
 var (
+	ServerTerminated  = errors.New("Server already terminated")
 	NotAStructPointer = errors.New("Not a pointer to a struct")
 	UnexpectedMessage = errors.New("Unexpected message")
 	shutdownQuery     = &queryShutdown{}
 )
 
 func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, commitLatency time.Duration, dbiStruct interface{}) (*MDBServer, error) {
-	writerChan := make(chan mdbQuery, defaultChanSize)
-	readerChan := make(chan mdbQuery, defaultChanSize)
 	if numReaders < 1 {
 		numReaders = runtime.GOMAXPROCS(0) / 2 // with 0, just returns current value
 		if numReaders < 1 {
@@ -69,16 +67,54 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 		}
 	}
 	server := &MDBServer{
-		writerChan:  writerChan,
-		readerChan:  readerChan,
-		terminated:  make(chan struct{}),
 		readers:     make([]*mdbReader, numReaders),
 		rwtxn:       &RWTxn{},
-		batchedTxn:  make([]*readWriteTransactionFuture, 0, defaultChanSize),
+		batchedTxn:  make([]*readWriteTransactionFuture, 0, 32), // MAGIC NUMBER
 		txnDuration: commitLatency,
 	}
+
+	var writerHead *cc.ChanCell
+	writerHead, server.writerCellTail = cc.NewChanCellTail(
+		func(n int, cell *cc.ChanCell) {
+			queryChan := make(chan mdbQuery, n)
+			cell.Open = func() { server.writerChan = queryChan }
+			cell.Close = func() { close(queryChan) }
+			server.writerEnqueueQueryInner = func(msg mdbQuery, curCell *cc.ChanCell, cont cc.CurCellConsumer) (bool, cc.CurCellConsumer) {
+				if curCell == cell {
+					select {
+					case queryChan <- msg:
+						return true, nil
+					default:
+						return false, nil
+					}
+				} else {
+					return false, cont
+				}
+			}
+		})
+
+	var readerHead *cc.ChanCell
+	readerHead, server.readerCellTail = cc.NewChanCellTail(
+		func(n int, cell *cc.ChanCell) {
+			queryChan := make(chan mdbQuery, n)
+			cell.Open = func() { server.readerChan = queryChan }
+			cell.Close = func() { close(queryChan) }
+			server.readerEnqueueQueryInner = func(msg mdbQuery, curCell *cc.ChanCell, cont cc.CurCellConsumer) (bool, cc.CurCellConsumer) {
+				if curCell == cell {
+					select {
+					case queryChan <- msg:
+						return true, nil
+					default:
+						return false, nil
+					}
+				} else {
+					return false, cont
+				}
+			}
+		})
+
 	resultChan := make(chan error, 0)
-	go server.actor(path, openFlags, filemode, mapSize, dbiStruct, resultChan)
+	go server.actor(path, openFlags, filemode, mapSize, dbiStruct, resultChan, writerHead, readerHead)
 	result := <-resultChan
 	if result == nil {
 		return server, nil
@@ -89,56 +125,80 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 
 func (mdb *MDBServer) ReadonlyTransaction(txn ReadonlyTransaction) TransactionFuture {
 	txnFuture := newReadonlyTransactionFuture(txn, mdb)
-	select {
-	case mdb.readerChan <- txnFuture:
-	case <-mdb.terminated:
+	if !mdb.enqueueReader(txnFuture) {
+		txnFuture.error = ServerTerminated
+		close(txnFuture.signal)
 	}
 	return txnFuture
 }
 
 func (mdb *MDBServer) ReadWriteTransaction(forceCommit bool, txn ReadWriteTransaction) TransactionFuture {
 	txnFuture := newReadWriteTransactionFuture(txn, forceCommit, mdb)
-	select {
-	case mdb.writerChan <- txnFuture:
-	case <-mdb.terminated:
+	if !mdb.enqueueWriter(txnFuture) {
+		txnFuture.error = ServerTerminated
+		close(txnFuture.signal)
 	}
 	return txnFuture
 }
 
 func (mdb *MDBServer) Shutdown() {
-	select {
-	case mdb.writerChan <- shutdownQuery:
-		<-mdb.terminated
-	case <-mdb.terminated:
+	if mdb.enqueueWriter(shutdownQuery) {
+		mdb.writerCellTail.Wait()
 	}
 }
 
-func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, initResult chan<- error) {
+func (mdb *MDBServer) enqueueReader(msg mdbQuery) bool {
+	var f cc.CurCellConsumer
+	f = func(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
+		return mdb.readerEnqueueQueryInner(msg, cell, f)
+	}
+	return mdb.readerCellTail.WithCell(f)
+}
+
+func (mdb *MDBServer) enqueueWriter(msg mdbQuery) bool {
+	var f cc.CurCellConsumer
+	f = func(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
+		return mdb.writerEnqueueQueryInner(msg, cell, f)
+	}
+	return mdb.writerCellTail.WithCell(f)
+}
+
+func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, initResult chan<- error, writerHead, readerHead *cc.ChanCell) {
 	runtime.LockOSThread()
 	defer func() {
 		if server.env != nil {
 			server.env.Close()
 		}
 	}()
-	if err := server.init(path, flags, mode, mapSize, dbiStruct); err != nil {
+	if err := server.init(path, flags, mode, mapSize, dbiStruct, readerHead); err != nil {
 		initResult <- err
 		return
 	}
 	close(initResult)
-	server.actorLoop()
+	server.actorLoop(writerHead)
 }
 
-func (server *MDBServer) actorLoop() {
+func (server *MDBServer) actorLoop(writerHead *cc.ChanCell) {
 	var err error
 	terminate := false
+	writerChan := server.writerChan
 	for !terminate {
 		if server.txn == nil {
-			query := <-server.writerChan
-			terminate, err = server.handleQuery(query)
+			if query, ok := <-writerChan; ok {
+				terminate, err = server.handleQuery(query)
+			} else {
+				writerHead = writerHead.Next()
+				writerChan = server.writerChan
+			}
 		} else {
 			select {
-			case query := <-server.writerChan:
-				terminate, err = server.handleQuery(query)
+			case query, ok := <-writerChan:
+				if ok {
+					terminate, err = server.handleQuery(query)
+				} else {
+					writerHead = writerHead.Next()
+					writerChan = server.writerChan
+				}
 			case <-server.ticker.C:
 				err = server.commitTxns()
 			default:
@@ -153,8 +213,9 @@ func (server *MDBServer) actorLoop() {
 	if err = server.commitTxns(); err != nil {
 		log.Println(err)
 	}
+	server.writerCellTail.Terminate()
 	server.handleShutdown()
-	close(server.terminated)
+	server.readerCellTail.Terminate()
 }
 
 func (server *MDBServer) handleQuery(query mdbQuery) (terminate bool, err error) {
@@ -173,13 +234,13 @@ func (server *MDBServer) handleShutdown() {
 	wg := new(sync.WaitGroup)
 	wg.Add(len(server.readers))
 	is := (*queryInternalShutdown)(wg)
-	for _, reader := range server.readers {
-		reader.queryChan <- is
+	for range server.readers {
+		server.enqueueReader(is)
 	}
 	wg.Wait()
 }
 
-func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}) error {
+func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, readerHead *cc.ChanCell) error {
 	env, err := mdb.NewEnv()
 	if err != nil {
 		return err
@@ -225,12 +286,11 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 
 	for idx := range server.readers {
 		reader := &mdbReader{
-			queryChan: make(chan mdbQuery, defaultChanSize),
-			server:    server,
-			rtxn:      &RTxn{},
+			server: server,
+			rtxn:   &RTxn{},
 		}
 		server.readers[idx] = reader
-		go reader.actorLoop()
+		go reader.actorLoop(readerHead)
 	}
 	return nil
 }
@@ -335,28 +395,25 @@ func analyzeDbiStruct(dbiStruct interface{}) (map[string]*DBISettings, error) {
 	return m, nil
 }
 
-func (reader *mdbReader) actorLoop() {
+func (reader *mdbReader) actorLoop(readerHead *cc.ChanCell) {
 	runtime.LockOSThread()
-	txnChan := reader.server.readerChan
 	var err error
 	terminate := false
+	readerChan := reader.server.readerChan
 	for !terminate {
-		select {
-		case direct := <-reader.queryChan:
-			switch query := direct.(type) {
+		if query, ok := <-readerChan; ok {
+			switch msg := query.(type) {
+			case *readonlyTransactionFuture:
+				err = reader.handleRunTxn(msg)
 			case *queryInternalShutdown:
-				((*sync.WaitGroup)(query)).Done()
+				((*sync.WaitGroup)(msg)).Done()
 				terminate = true
 			default:
 				err = UnexpectedMessage
 			}
-		case query := <-txnChan:
-			switch msg := query.(type) {
-			case *readonlyTransactionFuture:
-				err = reader.handleRunTxn(msg)
-			default:
-				err = UnexpectedMessage
-			}
+		} else {
+			readerHead = readerHead.Next()
+			readerChan = reader.server.readerChan
 		}
 		terminate = terminate || err != nil
 	}
@@ -446,23 +503,23 @@ type readWriteTransactionFuture struct {
 	forceCommit bool
 }
 
-func newPlainTransactionFuture(mdb *MDBServer) plainTransactionFuture {
+func newPlainTransactionFuture(terminated chan struct{}) plainTransactionFuture {
 	return plainTransactionFuture{
 		signal:     make(chan struct{}),
-		terminated: mdb.terminated,
+		terminated: terminated,
 	}
 }
 
 func newReadonlyTransactionFuture(txn ReadonlyTransaction, mdb *MDBServer) *readonlyTransactionFuture {
 	return &readonlyTransactionFuture{
-		plainTransactionFuture: newPlainTransactionFuture(mdb),
+		plainTransactionFuture: newPlainTransactionFuture(mdb.readerCellTail.Terminated),
 		txn: txn,
 	}
 }
 
 func newReadWriteTransactionFuture(txn ReadWriteTransaction, forceCommit bool, mdb *MDBServer) *readWriteTransactionFuture {
 	return &readWriteTransactionFuture{
-		plainTransactionFuture: newPlainTransactionFuture(mdb),
+		plainTransactionFuture: newPlainTransactionFuture(mdb.writerCellTail.Terminated),
 		txn:         txn,
 		forceCommit: forceCommit,
 	}
