@@ -73,7 +73,7 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 		txnDuration: commitLatency,
 	}
 
-	var writerHead *cc.ChanCell
+	var writerHead *cc.ChanCellHead
 	writerHead, server.writerCellTail = cc.NewChanCellTail(
 		func(n int, cell *cc.ChanCell) {
 			queryChan := make(chan mdbQuery, n)
@@ -93,7 +93,7 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 			}
 		})
 
-	var readerHead *cc.ChanCell
+	var readerHead *cc.ChanCellHead
 	readerHead, server.readerCellTail = cc.NewChanCellTail(
 		func(n int, cell *cc.ChanCell) {
 			queryChan := make(chan mdbQuery, n)
@@ -163,7 +163,7 @@ func (mdb *MDBServer) enqueueWriter(msg mdbQuery) bool {
 	return mdb.writerCellTail.WithCell(f)
 }
 
-func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, initResult chan<- error, writerHead, readerHead *cc.ChanCell) {
+func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, initResult chan<- error, writerHead, readerHead *cc.ChanCellHead) {
 	runtime.LockOSThread()
 	defer func() {
 		if server.env != nil {
@@ -178,17 +178,21 @@ func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, db
 	server.actorLoop(writerHead)
 }
 
-func (server *MDBServer) actorLoop(writerHead *cc.ChanCell) {
-	var err error
+func (server *MDBServer) actorLoop(writerHead *cc.ChanCellHead) {
+	var (
+		err        error
+		writerChan <-chan mdbQuery
+		writerCell *cc.ChanCell
+	)
+	chanFun := func(cell *cc.ChanCell) { writerChan, writerCell = server.writerChan, cell }
+	writerHead.WithCell(chanFun)
 	terminate := false
-	writerChan := server.writerChan
 	for !terminate {
 		if server.txn == nil {
 			if query, ok := <-writerChan; ok {
 				terminate, err = server.handleQuery(query)
 			} else {
-				writerHead = writerHead.Next()
-				writerChan = server.writerChan
+				writerHead.Next(writerCell, chanFun)
 			}
 		} else {
 			select {
@@ -196,8 +200,7 @@ func (server *MDBServer) actorLoop(writerHead *cc.ChanCell) {
 				if ok {
 					terminate, err = server.handleQuery(query)
 				} else {
-					writerHead = writerHead.Next()
-					writerChan = server.writerChan
+					writerHead.Next(writerCell, chanFun)
 				}
 			case <-server.ticker.C:
 				err = server.commitTxns()
@@ -240,7 +243,7 @@ func (server *MDBServer) handleShutdown() {
 	wg.Wait()
 }
 
-func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, readerHead *cc.ChanCell) error {
+func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, readerHead *cc.ChanCellHead) error {
 	env, err := mdb.NewEnv()
 	if err != nil {
 		return err
@@ -395,11 +398,16 @@ func analyzeDbiStruct(dbiStruct interface{}) (map[string]*DBISettings, error) {
 	return m, nil
 }
 
-func (reader *mdbReader) actorLoop(readerHead *cc.ChanCell) {
+func (reader *mdbReader) actorLoop(readerHead *cc.ChanCellHead) {
 	runtime.LockOSThread()
-	var err error
+	var (
+		err        error
+		readerChan <-chan mdbQuery
+		readerCell *cc.ChanCell
+	)
+	chanFun := func(cell *cc.ChanCell) { readerChan, readerCell = reader.server.readerChan, cell }
+	readerHead.WithCell(chanFun)
 	terminate := false
-	readerChan := reader.server.readerChan
 	for !terminate {
 		if query, ok := <-readerChan; ok {
 			switch msg := query.(type) {
@@ -412,8 +420,7 @@ func (reader *mdbReader) actorLoop(readerHead *cc.ChanCell) {
 				err = UnexpectedMessage
 			}
 		} else {
-			readerHead = readerHead.Next()
-			readerChan = reader.server.readerChan
+			readerHead.Next(readerCell, chanFun)
 		}
 		terminate = terminate || err != nil
 	}
