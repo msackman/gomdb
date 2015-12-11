@@ -178,8 +178,12 @@ func (env *Env) Sync(force int) error {
 	return errno(ret)
 }
 
-func (env *Env) SetFlags(flags uint, onoff int) error {
-	ret := C.mdb_env_set_flags(env.env, C.uint(flags), C.int(onoff))
+func (env *Env) SetFlags(flags uint, set bool) error {
+	onoff := C.int(0)
+	if set {
+		onoff = C.int(1)
+	}
+	ret := C.mdb_env_set_flags(env.env, C.uint(flags), onoff)
 	return errno(ret)
 }
 

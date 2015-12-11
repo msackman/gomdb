@@ -51,6 +51,7 @@ func (qs *queryShutdown) mdbQueryWitness()                {}
 func (qis *queryInternalShutdown) mdbQueryWitness()       {}
 func (rotf *readonlyTransactionFuture) mdbQueryWitness()  {}
 func (rwtf *readWriteTransactionFuture) mdbQueryWitness() {}
+func (wef *withEnvFuture) mdbQueryWitness()               {}
 
 var (
 	ServerTerminated  = errors.New("Server already terminated")
@@ -141,6 +142,15 @@ func (mdb *MDBServer) ReadWriteTransaction(forceCommit bool, txn ReadWriteTransa
 	return txnFuture
 }
 
+func (mdb *MDBServer) WithEnv(fun func(*mdb.Env) (interface{}, error)) TransactionFuture {
+	future := newWithEnvFuture(fun, mdb)
+	if !mdb.enqueueWriter(future) {
+		future.error = ServerTerminated
+		close(future.signal)
+	}
+	return future
+}
+
 func (mdb *MDBServer) Shutdown() {
 	if mdb.enqueueWriter(shutdownQuery) {
 		mdb.writerCellTail.Wait()
@@ -227,6 +237,8 @@ func (server *MDBServer) handleQuery(query mdbQuery) (terminate bool, err error)
 		terminate = true
 	case *readWriteTransactionFuture:
 		err = server.handleRunTxn(msg)
+	case *withEnvFuture:
+		err = server.handleWithEnv(msg)
 	default:
 		err = UnexpectedMessage
 	}
@@ -298,6 +310,17 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 	return nil
 }
 
+func (server *MDBServer) handleWithEnv(future *withEnvFuture) error {
+	if err := server.commitTxns(); err != nil {
+		future.error = err
+		close(future.signal)
+		return err
+	}
+	future.result, future.error = future.fun(server.env)
+	close(future.signal)
+	return future.error
+}
+
 func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) error {
 	/*
 		If creating a txn, or commiting a txn errors, then that kills both the txns and us.
@@ -323,7 +346,7 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 	txnFuture.result, txnErr = txnFuture.txn(rwtxn)
 	if txnErr == nil {
 		if txnFuture.forceCommit {
-			server.commitTxns()
+			err = server.commitTxns()
 		}
 	} else {
 		txn.Abort()
@@ -510,6 +533,11 @@ type readWriteTransactionFuture struct {
 	forceCommit bool
 }
 
+type withEnvFuture struct {
+	plainTransactionFuture
+	fun func(*mdb.Env) (interface{}, error)
+}
+
 func newPlainTransactionFuture(terminated chan struct{}) plainTransactionFuture {
 	return plainTransactionFuture{
 		signal:     make(chan struct{}),
@@ -529,5 +557,12 @@ func newReadWriteTransactionFuture(txn ReadWriteTransaction, forceCommit bool, m
 		plainTransactionFuture: newPlainTransactionFuture(mdb.writerCellTail.Terminated),
 		txn:         txn,
 		forceCommit: forceCommit,
+	}
+}
+
+func newWithEnvFuture(fun func(*mdb.Env) (interface{}, error), mdb *MDBServer) *withEnvFuture {
+	return &withEnvFuture{
+		plainTransactionFuture: newPlainTransactionFuture(mdb.writerCellTail.Terminated),
+		fun: fun,
 	}
 }
