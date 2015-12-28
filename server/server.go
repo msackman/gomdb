@@ -549,7 +549,7 @@ func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (mdb.Val, error) {
 	}
 }
 
-func (rtxn *RTxn) WithCursor(dbi *DBISettings, fun func(cursor *mdb.Cursor) interface{}) (interface{}, error) {
+func (rtxn *RTxn) WithCursor(dbi *DBISettings, fun func(cursor *Cursor) interface{}) (interface{}, error) {
 	if rtxn.error == nil {
 		cursor, err := rtxn.txn.CursorOpen(dbi.dbi)
 		if err != nil {
@@ -557,9 +557,55 @@ func (rtxn *RTxn) WithCursor(dbi *DBISettings, fun func(cursor *mdb.Cursor) inte
 			return nil, err
 		}
 		defer cursor.Close()
-		return fun(cursor), nil
+		return fun(&Cursor{RTxn: rtxn, cursor: cursor}), nil
 	}
 	return nil, rtxn.error
+}
+
+type Cursor struct {
+	*RTxn
+	cursor *mdb.Cursor
+}
+
+func (c *Cursor) Get(key, val []byte, op uint) ([]byte, []byte, error) {
+	if c.error == nil {
+		rkey, rVal, err := c.cursor.Get(key, val, op)
+		if err != nil && err != mdb.NotFound {
+			c.error = err
+		}
+		return rkey, rVal, err
+	}
+	return nil, nil, c.error
+}
+
+func (c *Cursor) GetVal(key, val []byte, op uint) (mdb.Val, mdb.Val, error) {
+	if c.error == nil {
+		rkey, rVal, err := c.cursor.GetVal(key, val, op)
+		if err != nil && err != mdb.NotFound {
+			c.error = err
+		}
+		return rkey, rVal, err
+	}
+	v := mdb.Wrap(nil)
+	return v, v, c.error
+}
+
+func (c *Cursor) Put(key, val []byte, flags uint) error {
+	if c.error == nil {
+		c.error = c.cursor.Put(key, val, flags)
+	}
+	return c.error
+}
+
+func (c *Cursor) Del(flags uint) error {
+	if c.error == nil {
+		err := c.cursor.Del(flags)
+		if err != nil && err != mdb.NotFound {
+			c.error = err
+		}
+		return err
+	}
+	return c.error
 }
 
 type RWTxn struct {
