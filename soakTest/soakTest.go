@@ -94,15 +94,15 @@ func main() {
 func populate(records int, server *mdbs.MDBServer, dbs *DBs) error {
 	key := make([]byte, keySize)
 	val := make([]byte, valSize)
-	_, err := server.ReadWriteTransaction(false, func(txn *mdbs.RWTxn) (interface{}, error) {
+	_, err := server.ReadWriteTransaction(false, func(txn *mdbs.RWTxn) interface{} {
 		for idx := 0; idx < records; idx++ {
 			int64ToBytes(int64(idx), key)
 			int64ToBytes(int64(idx), val)
 			if err := txn.Put(dbs.Test, key, val, 0); err != nil {
-				return nil, err
+				return nil
 			}
 		}
-		return nil, nil
+		return nil
 	}).ResultError()
 	return err
 }
@@ -132,17 +132,18 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 				key := make([]byte, keySize)
 				int64ToBytes(keyNum, key)
 				forceFlush := keyNum%10 == 0
-				future := server.ReadWriteTransaction(forceFlush, func(txn *mdbs.RWTxn) (interface{}, error) {
+				future := server.ReadWriteTransaction(forceFlush, func(txn *mdbs.RWTxn) interface{} {
 					val, err1 := txn.Get(dbs.Test, key)
 					if err1 != nil {
-						return nil, err1
+						return nil
 					}
 					num := bytesToInt64(val)
 					if num < keyNum {
-						return nil, fmt.Errorf("Expected val (%v) >= key (%v)", num, keyNum)
+						panic(fmt.Errorf("Expected val (%v) >= key (%v)", num, keyNum))
 					}
 					int64ToBytes(num+1, val)
-					return nil, txn.Put(dbs.Test, key, val, 0)
+					txn.Put(dbs.Test, key, val, 0)
+					return nil
 				})
 				if forceFlush {
 					_, err = future.ResultError()
@@ -151,16 +152,16 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 				keyNum := randSource.Int63n(records)
 				key := make([]byte, keySize)
 				int64ToBytes(keyNum, key)
-				_, err = server.ReadonlyTransaction(func(txn *mdbs.RTxn) (interface{}, error) {
+				_, err = server.ReadonlyTransaction(func(txn *mdbs.RTxn) interface{} {
 					val, err1 := txn.GetVal(dbs.Test, key)
 					if err1 != nil {
-						return nil, err1
+						return nil
 					}
 					num := bytesToInt64(val.BytesNoCopy())
 					if num < keyNum {
-						return nil, fmt.Errorf("Expected val (%v) >= key (%v)", num, keyNum)
+						panic(fmt.Errorf("Expected val (%v) >= key (%v)", num, keyNum))
 					}
-					return nil, nil
+					return nil
 				}).ResultError()
 			}
 			if err != nil {

@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-type ReadonlyTransaction func(rtxn *RTxn) (interface{}, error)
-type ReadWriteTransaction func(rwtxn *RWTxn) (interface{}, error)
+type ReadonlyTransaction func(rtxn *RTxn) interface{}
+type ReadWriteTransaction func(rwtxn *RWTxn) interface{}
 
 type DBISettings struct {
 	Flags uint
@@ -322,10 +322,8 @@ func (server *MDBServer) handleWithEnv(future *withEnvFuture) error {
 }
 
 func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) error {
-	/*
-		If creating a txn, or commiting a txn errors, then that kills both the txns and us.
-			If the txn func itself errors, that kills the txns, but it doesn't kill us.
-	*/
+	// Txns can not choose to abort. Thus any "errors" that occur are
+	// completely fatal to us.
 	var err error
 	server.batchedTxn = append(server.batchedTxn, txnFuture)
 	txn := server.txn
@@ -339,29 +337,30 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 	}
 	rwtxn := server.rwtxn
 	rwtxn.txn = txn
-	var txnErr error
-	if !txnFuture.forceCommit {
-		server.ensureTicker()
-	}
-	txnFuture.result, txnErr = txnFuture.txn(rwtxn)
-	if txnErr == nil {
+	rwtxn.error = nil
+	txnFuture.result = txnFuture.txn(rwtxn)
+	txnFuture.error, err = rwtxn.error, rwtxn.error
+	if err == nil {
 		if txnFuture.forceCommit {
 			err = server.commitTxns()
+		} else {
+			server.ensureTicker()
 		}
 	} else {
 		txn.Abort()
-		server.txnsComplete(txnErr)
+		server.txn = nil
+		server.txnsComplete(err)
 	}
 	return err
 }
 
 func (server *MDBServer) txnsComplete(err error) {
 	server.txn = nil
+	server.cancelTicker()
 	for _, txnFuture := range server.batchedTxn {
 		txnFuture.error = err
 		close(txnFuture.signal)
 	}
-	server.cancelTicker()
 	server.batchedTxn = server.batchedTxn[:0]
 }
 
@@ -461,40 +460,96 @@ func (reader *mdbReader) handleRunTxn(txnFuture *readonlyTransactionFuture) erro
 	}
 	rtxn := reader.rtxn
 	rtxn.txn = txn
-	txnFuture.result, txnFuture.error = txnFuture.txn(rtxn)
+	rtxn.error = nil
+	txnFuture.result = txnFuture.txn(rtxn)
+	txnFuture.error = rtxn.error
 	txn.Abort()
 	return nil
 }
 
 type RTxn struct {
-	txn *mdb.Txn
+	txn   *mdb.Txn
+	error error
 }
 
-func (rtxn *RTxn) Reset()                                           { rtxn.txn.Reset() }
-func (rtxn *RTxn) Renew() error                                     { return rtxn.txn.Renew() }
-func (rtxn *RTxn) Get(dbi *DBISettings, key []byte) ([]byte, error) { return rtxn.txn.Get(dbi.dbi, key) }
-func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (mdb.Val, error) {
-	return rtxn.txn.GetVal(dbi.dbi, key)
-}
-func (rtxn *RTxn) WithCursor(dbi *DBISettings, fun func(cursor *mdb.Cursor) (interface{}, error)) (interface{}, error) {
-	cursor, err := rtxn.txn.CursorOpen(dbi.dbi)
-	if err != nil {
-		return nil, err
+func (rtxn *RTxn) Reset() error {
+	if rtxn.error == nil {
+		rtxn.txn.Reset()
 	}
-	defer cursor.Close()
-	return fun(cursor)
+	return rtxn.error
+}
+
+func (rtxn *RTxn) Renew() error {
+	if rtxn.error == nil {
+		rtxn.error = rtxn.txn.Renew()
+	}
+	return rtxn.error
+}
+
+func (rtxn *RTxn) Get(dbi *DBISettings, key []byte) ([]byte, error) {
+	if rtxn.error == nil {
+		result, err := rtxn.txn.Get(dbi.dbi, key)
+		if err != nil && err != mdb.NotFound {
+			rtxn.error = err
+		}
+		return result, err
+	} else {
+		return nil, rtxn.error
+	}
+}
+
+func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (mdb.Val, error) {
+	if rtxn.error == nil {
+		result, err := rtxn.txn.GetVal(dbi.dbi, key)
+		if err != nil && err != mdb.NotFound {
+			rtxn.error = err
+		}
+		return result, err
+	} else {
+		return mdb.Wrap(nil), rtxn.error
+	}
+}
+
+func (rtxn *RTxn) WithCursor(dbi *DBISettings, fun func(cursor *mdb.Cursor) interface{}) (interface{}, error) {
+	if rtxn.error == nil {
+		cursor, err := rtxn.txn.CursorOpen(dbi.dbi)
+		if err != nil {
+			rtxn.error = err
+			return nil, err
+		}
+		defer cursor.Close()
+		return fun(cursor), nil
+	}
+	return nil, rtxn.error
 }
 
 type RWTxn struct {
 	RTxn
 }
 
-func (rwtxn *RWTxn) Drop(dbi *DBISettings, del int) error { return rwtxn.txn.Drop(dbi.dbi, del) }
-func (rwtxn *RWTxn) Put(dbi *DBISettings, key, val []byte, flags uint) error {
-	return rwtxn.txn.Put(dbi.dbi, key, val, flags)
+func (rwtxn *RWTxn) Drop(dbi *DBISettings, del int) error {
+	if rwtxn.error == nil {
+		rwtxn.error = rwtxn.txn.Drop(dbi.dbi, del)
+	}
+	return rwtxn.error
 }
+
+func (rwtxn *RWTxn) Put(dbi *DBISettings, key, val []byte, flags uint) error {
+	if rwtxn.error == nil {
+		rwtxn.error = rwtxn.txn.Put(dbi.dbi, key, val, flags)
+	}
+	return rwtxn.error
+}
+
 func (rwtxn *RWTxn) Del(dbi *DBISettings, key, val []byte) error {
-	return rwtxn.txn.Del(dbi.dbi, key, val)
+	if rwtxn.error == nil {
+		err := rwtxn.txn.Del(dbi.dbi, key, val)
+		if err != nil && err != mdb.NotFound {
+			rwtxn.error = err
+		}
+		return err
+	}
+	return rwtxn.error
 }
 
 type TransactionFuture interface {
