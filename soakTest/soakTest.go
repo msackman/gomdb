@@ -22,7 +22,7 @@ type DBs struct {
 const (
 	keySize   = 16
 	valSize   = 96
-	terabyte  = 1099511627776
+	mapSize   = 10485760
 	openFlags = mdb.WRITEMAP //| mdb.MAPASYNC // try |mdb.MAPASYNC for ludicrous speed
 )
 
@@ -63,7 +63,7 @@ func main() {
 	dbs := &DBs{
 		Test: &mdbs.DBISettings{Flags: mdb.CREATE | mdb.INTEGERKEY},
 	}
-	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, terabyte, 0, 2*time.Millisecond, dbs)
+	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, mapSize, 0, 2*time.Millisecond, dbs)
 	if err != nil {
 		log.Fatal("Cannot start server:", err)
 	}

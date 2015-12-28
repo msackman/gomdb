@@ -328,7 +328,7 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 	server.batchedTxn = append(server.batchedTxn, txnFuture)
 	txn := server.txn
 	if txn == nil {
-		txn, err = server.env.BeginTxn(nil, 0)
+		txn, err = server.createTxn(0)
 		if err != nil {
 			server.txnsComplete(err)
 			return err
@@ -339,19 +339,58 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 	rwtxn.txn = txn
 	rwtxn.error = nil
 	txnFuture.result = txnFuture.txn(rwtxn)
-	txnFuture.error, err = rwtxn.error, rwtxn.error
-	if err == nil {
+	err = rwtxn.error
+	switch err {
+	case nil:
 		if txnFuture.forceCommit {
 			err = server.commitTxns()
 		} else {
 			server.ensureTicker()
 		}
-	} else {
+
+	case mdb.MapFull:
+		txn.Abort()
+		server.txn = nil
+		var info *mdb.Info
+		info, err = server.env.Info()
+		if err == nil {
+			log.Println("Doubling map size from", info.MapSize)
+			err = server.env.SetMapSize(info.MapSize * 2)
+			if err == nil {
+				txns := make([]*readWriteTransactionFuture, len(server.batchedTxn))
+				copy(txns, server.batchedTxn)
+				server.batchedTxn = server.batchedTxn[:0]
+				for idx, txnFuture := range txns {
+					err = server.handleRunTxn(txnFuture)
+					if err != nil {
+						server.batchedTxn = append(server.batchedTxn, txns[idx+1:]...)
+						server.txnsComplete(err)
+						break
+					}
+				}
+			}
+		}
+
+	default:
+		txnFuture.error = err
 		txn.Abort()
 		server.txn = nil
 		server.txnsComplete(err)
 	}
 	return err
+}
+
+func (server *MDBServer) createTxn(flags uint) (*mdb.Txn, error) {
+	for {
+		txn, err := server.env.BeginTxn(nil, flags)
+		if err == mdb.MapResized {
+			err = server.env.SetMapSize(0)
+			if err == nil {
+				continue
+			}
+		}
+		return txn, err
+	}
 }
 
 func (server *MDBServer) txnsComplete(err error) {
@@ -452,8 +491,8 @@ func (reader *mdbReader) actorLoop(readerHead *cc.ChanCellHead) {
 }
 
 func (reader *mdbReader) handleRunTxn(txnFuture *readonlyTransactionFuture) error {
+	txn, err := reader.server.createTxn(mdb.RDONLY)
 	defer close(txnFuture.signal)
-	txn, err := reader.server.env.BeginTxn(nil, mdb.RDONLY)
 	if err != nil {
 		txnFuture.error = err
 		return err
