@@ -446,8 +446,14 @@ func (server *MDBServer) commitTxns() error {
 		return nil
 	} else {
 		err := server.txn.Commit()
-		server.txnsComplete(err)
-		return err
+		if err == mdb.MapFull {
+			server.txn = nil
+			return server.expandMap()
+
+		} else {
+			server.txnsComplete(err)
+			return err
+		}
 	}
 }
 
@@ -503,6 +509,11 @@ func (reader *mdbReader) actorLoop(readerHead *cc.ChanCellHead) {
 			case *readonlyTransactionFuture:
 				err = reader.handleRunTxn(msg)
 			case *queryPause:
+				txn := reader.rtxn.txn
+				if txn != nil {
+					txn.Abort()
+					reader.rtxn.txn = nil
+				}
 				msg.pause.Done()
 				<-msg.resume
 			case *queryInternalShutdown:
