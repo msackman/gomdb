@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -485,13 +486,17 @@ func analyzeDbiStruct(dbiStruct interface{}) (map[string]*DBISettings, error) {
 func (reader *mdbReader) actorLoop(readerHead *cc.ChanCellHead) {
 	runtime.LockOSThread()
 	var (
-		err        error
 		readerChan <-chan mdbQuery
 		readerCell *cc.ChanCell
 	)
 	chanFun := func(cell *cc.ChanCell) { readerChan, readerCell = reader.server.readerChan, cell }
 	readerHead.WithCell(chanFun)
-	terminate := false
+
+	txn, err := reader.server.createTxn(mdb.RDONLY)
+	if err == nil {
+		reader.rtxn.txn = txn
+	}
+	terminate := err != nil
 	for !terminate {
 		if query, ok := <-readerChan; ok {
 			switch msg := query.(type) {
@@ -517,18 +522,29 @@ func (reader *mdbReader) actorLoop(readerHead *cc.ChanCellHead) {
 }
 
 func (reader *mdbReader) handleRunTxn(txnFuture *readonlyTransactionFuture) error {
-	txn, err := reader.server.createTxn(mdb.RDONLY)
 	defer close(txnFuture.signal)
+	rtxn := reader.rtxn
+	var err error
+	if rtxn.txn != nil {
+		err = rtxn.txn.Renew()
+		if err == mdb.Invalid || err == syscall.EINVAL {
+			rtxn.txn.Abort()
+			rtxn.txn = nil
+		}
+	}
+	if rtxn.txn == nil {
+		rtxn.txn, err = reader.server.createTxn(mdb.RDONLY)
+	}
 	if err != nil {
+		rtxn.txn = nil
 		txnFuture.error = err
 		return err
 	}
-	rtxn := reader.rtxn
-	rtxn.txn = txn
+
 	rtxn.error = nil
 	txnFuture.result = txnFuture.txn(rtxn)
 	txnFuture.error = rtxn.error
-	txn.Abort()
+	rtxn.txn.Reset()
 	return nil
 }
 
