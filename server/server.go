@@ -46,9 +46,14 @@ type mdbQuery interface {
 
 type queryShutdown struct{}
 type queryInternalShutdown sync.WaitGroup
+type queryPause struct {
+	pause  *sync.WaitGroup
+	resume <-chan struct{}
+}
 
 func (qs *queryShutdown) mdbQueryWitness()                {}
 func (qis *queryInternalShutdown) mdbQueryWitness()       {}
+func (qp *queryPause) mdbQueryWitness()                   {}
 func (rotf *readonlyTransactionFuture) mdbQueryWitness()  {}
 func (rwtf *readWriteTransactionFuture) mdbQueryWitness() {}
 func (wef *withEnvFuture) mdbQueryWitness()               {}
@@ -351,31 +356,49 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 	case mdb.MapFull:
 		txn.Abort()
 		server.txn = nil
-		var info *mdb.Info
-		info, err = server.env.Info()
-		if err == nil {
-			log.Println("Doubling map size from", info.MapSize)
-			err = server.env.SetMapSize(info.MapSize * 2)
-			if err == nil {
-				txns := make([]*readWriteTransactionFuture, len(server.batchedTxn))
-				copy(txns, server.batchedTxn)
-				server.batchedTxn = server.batchedTxn[:0]
-				for idx, txnFuture := range txns {
-					err = server.handleRunTxn(txnFuture)
-					if err != nil {
-						server.batchedTxn = append(server.batchedTxn, txns[idx+1:]...)
-						server.txnsComplete(err)
-						break
-					}
-				}
-			}
-		}
+		err = server.expandMap()
 
 	default:
 		txnFuture.error = err
 		txn.Abort()
 		server.txn = nil
 		server.txnsComplete(err)
+	}
+	return err
+}
+
+func (server *MDBServer) expandMap() error {
+	info, err := server.env.Info()
+	if err == nil {
+		resume := make(chan struct{})
+		pauser := &queryPause{
+			pause:  new(sync.WaitGroup),
+			resume: resume,
+		}
+		pauser.pause.Add(len(server.readers))
+		for range server.readers {
+			server.enqueueReader(pauser)
+		}
+		pauser.pause.Wait()
+
+		mapSize := info.MapSize * 2
+		log.Println("New map size:", mapSize)
+		err = server.env.SetMapSize(mapSize)
+		close(resume)
+
+		if err == nil {
+			txns := make([]*readWriteTransactionFuture, len(server.batchedTxn))
+			copy(txns, server.batchedTxn)
+			server.batchedTxn = server.batchedTxn[:0]
+			for idx, txnFuture := range txns {
+				err = server.handleRunTxn(txnFuture)
+				if err != nil {
+					server.batchedTxn = append(server.batchedTxn, txns[idx+1:]...)
+					server.txnsComplete(err)
+					break
+				}
+			}
+		}
 	}
 	return err
 }
@@ -474,6 +497,9 @@ func (reader *mdbReader) actorLoop(readerHead *cc.ChanCellHead) {
 			switch msg := query.(type) {
 			case *readonlyTransactionFuture:
 				err = reader.handleRunTxn(msg)
+			case *queryPause:
+				msg.pause.Done()
+				<-msg.resume
 			case *queryInternalShutdown:
 				((*sync.WaitGroup)(msg)).Done()
 				terminate = true
