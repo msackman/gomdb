@@ -564,6 +564,13 @@ type RTxn struct {
 	error error
 }
 
+func (rtxn *RTxn) Error(err error) error {
+	if rtxn.error == nil {
+		rtxn.error = err
+	}
+	return rtxn.error
+}
+
 func (rtxn *RTxn) Reset() error {
 	if rtxn.error == nil {
 		rtxn.txn.Reset()
