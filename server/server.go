@@ -597,7 +597,8 @@ func (rtxn *RTxn) Get(dbi *DBISettings, key []byte) ([]byte, error) {
 	}
 }
 
-func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (mdb.Val, error) {
+// Caller's responsibility to call Free() on the value iff non-nil
+func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (*mdb.Val, error) {
 	if rtxn.error == nil {
 		result, err := rtxn.txn.GetVal(dbi.dbi, key)
 		if err != nil && err != mdb.NotFound {
@@ -605,7 +606,7 @@ func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (mdb.Val, error) {
 		}
 		return result, err
 	} else {
-		return mdb.Wrap(nil), rtxn.error
+		return nil, rtxn.error
 	}
 }
 
@@ -638,7 +639,8 @@ func (c *Cursor) Get(key, val []byte, op uint) ([]byte, []byte, error) {
 	return nil, nil, c.error
 }
 
-func (c *Cursor) GetVal(key, val []byte, op uint) (mdb.Val, mdb.Val, error) {
+// Caller's responsibility to call Free() on return key and value iff non-nil
+func (c *Cursor) GetVal(key, val []byte, op uint) (*mdb.Val, *mdb.Val, error) {
 	if c.error == nil {
 		rkey, rVal, err := c.cursor.GetVal(key, val, op)
 		if err != nil && err != mdb.NotFound {
@@ -646,8 +648,7 @@ func (c *Cursor) GetVal(key, val []byte, op uint) (mdb.Val, mdb.Val, error) {
 		}
 		return rkey, rVal, err
 	}
-	v := mdb.Wrap(nil)
-	return v, v, c.error
+	return nil, nil, c.error
 }
 
 func (c *Cursor) Put(key, val []byte, flags uint) error {

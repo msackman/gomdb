@@ -111,7 +111,8 @@ func BenchmarkTxnGetValRDONLY(b *testing.B) {
 	defer txn.Abort()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := txn.GetVal(dbi, ps[rand.Intn(len(ps))])
+		res, err := txn.GetVal(dbi, ps[rand.Intn(len(ps))])
+		res.Free()
 		if err == NotFound {
 			continue
 		}
@@ -204,7 +205,8 @@ func BenchmarkCursorScanValRDONLY(b *testing.B) {
 			defer cur.Close()
 			var count int64
 			for {
-				_, _, err := cur.GetVal(nil, nil, NEXT)
+				res, _, err := cur.GetVal(nil, nil, NEXT)
+				res.Free()
 				if err == NotFound {
 					return
 				}

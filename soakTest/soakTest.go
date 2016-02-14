@@ -158,6 +158,7 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 						return nil
 					}
 					num := bytesToInt64(val.BytesNoCopy())
+					val.Free()
 					if num < keyNum {
 						panic(fmt.Errorf("Expected val (%v) >= key (%v)", num, keyNum))
 					}
