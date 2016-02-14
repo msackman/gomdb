@@ -61,24 +61,29 @@ func (cursor *Cursor) MdbCursor() *C.MDB_cursor {
 }
 
 func (cursor *Cursor) Get(set_key, sval []byte, op uint) (key, val []byte, err error) {
-	k, v, err := cursor.GetVal(set_key, sval, op)
+	ckey, cval, err := cursor.GetVal(set_key, sval, op)
+	defer ckey.Free()
+	defer cval.Free()
 	if err != nil {
 		return nil, nil, err
 	}
-	return k.Bytes(), v.Bytes(), nil
+	return ckey.Bytes(), cval.Bytes(), nil
 }
 
-func (cursor *Cursor) GetVal(key, val []byte, op uint) (Val, Val, error) {
+// Caller's responsibility to call Free() on key and value results
+func (cursor *Cursor) GetVal(key, val []byte, op uint) (*Val, *Val, error) {
 	ckey := Wrap(key)
 	cval := Wrap(val)
-	ret := C.mdb_cursor_get(cursor.cursor, (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval), C.MDB_cursor_op(op))
+	ret := C.mdb_cursor_get(cursor.cursor, (*C.MDB_val)(ckey), (*C.MDB_val)(cval), C.MDB_cursor_op(op))
 	return ckey, cval, errno(ret)
 }
 
 func (cursor *Cursor) Put(key, val []byte, flags uint) error {
 	ckey := Wrap(key)
 	cval := Wrap(val)
-	ret := C.mdb_cursor_put(cursor.cursor, (*C.MDB_val)(&ckey), (*C.MDB_val)(&cval), C.uint(flags))
+	defer ckey.Free()
+	defer cval.Free()
+	ret := C.mdb_cursor_put(cursor.cursor, (*C.MDB_val)(ckey), (*C.MDB_val)(cval), C.uint(flags))
 	return errno(ret)
 }
 
