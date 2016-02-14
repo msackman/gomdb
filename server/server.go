@@ -474,10 +474,11 @@ func (rtxn *RTxn) Reset()                                           { rtxn.txn.R
 func (rtxn *RTxn) Renew() error                                     { return rtxn.txn.Renew() }
 func (rtxn *RTxn) Get(dbi *DBISettings, key []byte) ([]byte, error) { return rtxn.txn.Get(dbi.dbi, key) }
 
-// Caller's responsibility to call Free() on the value result
+// Do NOT call Free() on the result *mdb.Val
 func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (*mdb.Val, error) {
 	return rtxn.txn.GetVal(dbi.dbi, key)
 }
+
 func (rtxn *RTxn) WithCursor(dbi *DBISettings, fun func(cursor *mdb.Cursor) (interface{}, error)) (interface{}, error) {
 	cursor, err := rtxn.txn.CursorOpen(dbi.dbi)
 	if err != nil {

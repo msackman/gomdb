@@ -119,20 +119,19 @@ func (txn *Txn) Drop(dbi DBI, del int) error {
 
 func (txn *Txn) Get(dbi DBI, key []byte) ([]byte, error) {
 	val, err := txn.GetVal(dbi, key)
-	defer val.Free()
 	if err != nil {
 		return nil, err
 	}
 	return val.Bytes(), nil
 }
 
-// Caller's responsibility to call Free() on value result
+// Do NOT call Free() on the result *Val
 func (txn *Txn) GetVal(dbi DBI, key []byte) (*Val, error) {
 	ckey := Wrap(key)
 	defer ckey.Free()
-	cval := Wrap(nil)
-	ret := C.mdb_get(txn.txn, C.MDB_dbi(dbi), (*C.MDB_val)(ckey), (*C.MDB_val)(cval))
-	return cval, errno(ret)
+	var cval Val
+	ret := C.mdb_get(txn.txn, C.MDB_dbi(dbi), (*C.MDB_val)(ckey), (*C.MDB_val)(&cval))
+	return &cval, errno(ret)
 }
 
 func (txn *Txn) Put(dbi DBI, key []byte, val []byte, flags uint) error {
