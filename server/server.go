@@ -597,7 +597,7 @@ func (rtxn *RTxn) Get(dbi *DBISettings, key []byte) ([]byte, error) {
 	}
 }
 
-// Caller's responsibility to call Free() on the value iff non-nil
+// Do NOT call Free() on the result *mdb.Val
 func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (*mdb.Val, error) {
 	if rtxn.error == nil {
 		result, err := rtxn.txn.GetVal(dbi.dbi, key)

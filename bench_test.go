@@ -111,8 +111,7 @@ func BenchmarkTxnGetValRDONLY(b *testing.B) {
 	defer txn.Abort()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		res, err := txn.GetVal(dbi, ps[rand.Intn(len(ps))])
-		res.Free()
+		_, err := txn.GetVal(dbi, ps[rand.Intn(len(ps))])
 		if err == NotFound {
 			continue
 		}
