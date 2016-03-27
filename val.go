@@ -21,6 +21,7 @@ type Val C.MDB_val
 func Wrap(p []byte) *Val {
 	l := C.size_t(len(p))
 	ptr := C.malloc(C.sizeof_MDB_val + l)
+	C.memset(ptr, 0, C.sizeof_MDB_val+l)
 	val := (*C.MDB_val)(ptr)
 	val.mv_size = l
 

@@ -18,6 +18,20 @@ type ReadWriteTransaction func(rwtxn *RWTxn) interface{}
 type DBISettings struct {
 	Flags uint
 	dbi   mdb.DBI
+	name  string
+}
+
+func (dbis *DBISettings) Clone() *DBISettings {
+	if dbis == nil {
+		return nil
+	} else {
+		return &DBISettings{Flags: dbis.Flags}
+	}
+}
+
+type DBIsInterface interface {
+	SetServer(*MDBServer)
+	Clone() DBIsInterface
 }
 
 type MDBServer struct {
@@ -66,7 +80,8 @@ var (
 	shutdownQuery     = &queryShutdown{}
 )
 
-func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, commitLatency time.Duration, dbiStruct interface{}) (*MDBServer, error) {
+func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, commitLatency time.Duration, dbiStruct DBIsInterface) (DBIsInterface, error) {
+	dbiStruct = dbiStruct.Clone()
 	if numReaders < 1 {
 		numReaders = runtime.GOMAXPROCS(0) / 2 // with 0, just returns current value
 		if numReaders < 1 {
@@ -124,7 +139,8 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 	go server.actor(path, openFlags, filemode, mapSize, dbiStruct, resultChan, writerHead, readerHead)
 	result := <-resultChan
 	if result == nil {
-		return server, nil
+		dbiStruct.SetServer(server)
+		return dbiStruct, nil
 	} else {
 		return nil, result
 	}
@@ -179,7 +195,7 @@ func (mdb *MDBServer) enqueueWriter(msg mdbQuery) bool {
 	return mdb.writerCellTail.WithCell(f)
 }
 
-func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, initResult chan<- error, writerHead, readerHead *cc.ChanCellHead) {
+func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, dbiStruct DBIsInterface, initResult chan<- error, writerHead, readerHead *cc.ChanCellHead) {
 	runtime.LockOSThread()
 	defer func() {
 		if server.env != nil {
@@ -261,7 +277,7 @@ func (server *MDBServer) handleShutdown() {
 	wg.Wait()
 }
 
-func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, readerHead *cc.ChanCellHead) error {
+func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbiStruct DBIsInterface, readerHead *cc.ChanCellHead) error {
 	env, err := mdb.NewEnv()
 	if err != nil {
 		return err
@@ -274,12 +290,12 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 		return err
 	}
 
-	dbiMap, err := analyzeDbiStruct(dbiStruct)
+	dbis, err := analyzeDbiStruct(dbiStruct)
 	if err != nil {
 		return err
 	}
 
-	if l := len(dbiMap); l != 0 {
+	if l := len(dbis); l != 0 {
 		if err = env.SetMaxDBs(mdb.DBI(l)); err != nil {
 			return err
 		}
@@ -293,8 +309,8 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 	if err != nil {
 		return err
 	}
-	for name, value := range dbiMap {
-		dbi, err := txn.DBIOpen(&name, value.Flags)
+	for _, value := range dbis {
+		dbi, err := txn.DBIOpen(&value.name, value.Flags)
 		if err != nil {
 			txn.Abort()
 			return err
@@ -457,10 +473,10 @@ func (server *MDBServer) commitTxns() error {
 	}
 }
 
-func analyzeDbiStruct(dbiStruct interface{}) (map[string]*DBISettings, error) {
-	m := make(map[string]*DBISettings)
+func analyzeDbiStruct(dbiStruct DBIsInterface) ([]*DBISettings, error) {
+	l := []*DBISettings{}
 	if dbiStruct == nil {
-		return m, nil
+		return l, nil
 	}
 
 	t := reflect.TypeOf(dbiStruct)
@@ -483,10 +499,12 @@ func analyzeDbiStruct(dbiStruct interface{}) (map[string]*DBISettings, error) {
 		fieldValue := v.Field(idx)
 		if dbiSettingsType.AssignableTo(field.Type) && fieldValue.CanSet() &&
 			fieldValue.CanInterface() && !fieldValue.IsNil() {
-			m[field.Name] = fieldValue.Interface().(*DBISettings)
+			dbis := fieldValue.Interface().(*DBISettings)
+			dbis.name = field.Name
+			l = append(l, dbis)
 		}
 	}
-	return m, nil
+	return l, nil
 }
 
 func (reader *mdbReader) actorLoop(readerHead *cc.ChanCellHead) {

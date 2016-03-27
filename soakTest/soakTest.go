@@ -16,7 +16,16 @@ import (
 )
 
 type DBs struct {
+	*mdbs.MDBServer
 	Test *mdbs.DBISettings
+}
+
+func (dbs *DBs) Clone() mdbs.DBIsInterface {
+	return &DBs{Test: dbs.Test.Clone()}
+}
+
+func (dbs *DBs) SetServer(server *mdbs.MDBServer) {
+	dbs.MDBServer = server
 }
 
 const (
@@ -67,10 +76,11 @@ func main() {
 	if err != nil {
 		log.Fatal("Cannot start server:", err)
 	}
-	defer server.Shutdown()
+	dbs = server.(*DBs)
+	defer dbs.Shutdown()
 
 	popStart := time.Now()
-	if err = populate(records, server, dbs); err != nil {
+	if err = populate(records, dbs); err != nil {
 		log.Fatal(err)
 	}
 	popEnd := time.Now()
@@ -79,11 +89,11 @@ func main() {
 	log.Println("Populating DB with", records, "records took", popTime, "(", popRate, "records/sec )")
 
 	for idx := 0; idx < readers; idx++ {
-		go worker(int64(records), server, dbs, readers, idx, false)
+		go worker(int64(records), dbs, readers, idx, false)
 	}
 
 	if rewriter {
-		go worker(int64(records), server, dbs, 1, -1, true)
+		go worker(int64(records), dbs, 1, -1, true)
 	}
 
 	sigs := make(chan os.Signal, 1)
@@ -91,10 +101,10 @@ func main() {
 	<-sigs
 }
 
-func populate(records int, server *mdbs.MDBServer, dbs *DBs) error {
+func populate(records int, dbs *DBs) error {
 	key := make([]byte, keySize)
 	val := make([]byte, valSize)
-	_, err := server.ReadWriteTransaction(false, func(txn *mdbs.RWTxn) interface{} {
+	_, err := dbs.ReadWriteTransaction(false, func(txn *mdbs.RWTxn) interface{} {
 		for idx := 0; idx < records; idx++ {
 			int64ToBytes(int64(idx), key)
 			int64ToBytes(int64(idx), val)
@@ -107,7 +117,7 @@ func populate(records int, server *mdbs.MDBServer, dbs *DBs) error {
 	return err
 }
 
-func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, write bool) error {
+func worker(records int64, dbs *DBs, readers, id int, write bool) error {
 	msg := fmt.Sprint(id, ": Read")
 	if write {
 		msg = ": Wrote"
@@ -132,7 +142,7 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 				key := make([]byte, keySize)
 				int64ToBytes(keyNum, key)
 				forceFlush := keyNum%10 == 0
-				future := server.ReadWriteTransaction(forceFlush, func(txn *mdbs.RWTxn) interface{} {
+				future := dbs.ReadWriteTransaction(forceFlush, func(txn *mdbs.RWTxn) interface{} {
 					val, err1 := txn.Get(dbs.Test, key)
 					if err1 != nil {
 						return nil
@@ -152,7 +162,7 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 				keyNum := randSource.Int63n(records)
 				key := make([]byte, keySize)
 				int64ToBytes(keyNum, key)
-				_, err = server.ReadonlyTransaction(func(txn *mdbs.RTxn) interface{} {
+				_, err = dbs.ReadonlyTransaction(func(txn *mdbs.RTxn) interface{} {
 					val, err1 := txn.GetVal(dbs.Test, key)
 					if err1 != nil {
 						return nil
