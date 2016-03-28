@@ -199,8 +199,10 @@ func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, db
 	runtime.LockOSThread()
 	defer func() {
 		if server.env != nil {
-			server.env.Close()
+			server.handleShutdown()
 		}
+		server.writerCellTail.Terminate()
+		server.readerCellTail.Terminate()
 	}()
 	if err := server.init(path, flags, mode, mapSize, dbiStruct, readerHead); err != nil {
 		initResult <- err
@@ -248,9 +250,6 @@ func (server *MDBServer) actorLoop(writerHead *cc.ChanCellHead) {
 	if err = server.commitTxns(); err != nil {
 		log.Println(err)
 	}
-	server.writerCellTail.Terminate()
-	server.handleShutdown()
-	server.readerCellTail.Terminate()
 }
 
 func (server *MDBServer) handleQuery(query mdbQuery) (terminate bool, err error) {
@@ -275,6 +274,13 @@ func (server *MDBServer) handleShutdown() {
 		server.enqueueReader(is)
 	}
 	wg.Wait()
+
+	if err := server.env.Sync(1); err != nil {
+		log.Println("Error when flushing LMDB:", err)
+	}
+	if err := server.env.Close(); err != nil {
+		log.Println("Error when closing LMDB:", err)
+	}
 }
 
 func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbiStruct DBIsInterface, readerHead *cc.ChanCellHead) error {
