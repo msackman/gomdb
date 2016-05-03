@@ -74,7 +74,6 @@ func (rwtf *readWriteTransactionFuture) mdbQueryWitness() {}
 func (wef *withEnvFuture) mdbQueryWitness()               {}
 
 var (
-	ServerTerminated  = errors.New("Server already terminated")
 	NotAStructPointer = errors.New("Not a pointer to a struct")
 	UnexpectedMessage = errors.New("Unexpected message")
 	shutdownQuery     = &queryShutdown{}
@@ -149,7 +148,6 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 func (mdb *MDBServer) ReadonlyTransaction(txn ReadonlyTransaction) TransactionFuture {
 	txnFuture := newReadonlyTransactionFuture(txn, mdb)
 	if !mdb.enqueueReader(txnFuture) {
-		txnFuture.error = ServerTerminated
 		close(txnFuture.signal)
 	}
 	return txnFuture
@@ -158,7 +156,6 @@ func (mdb *MDBServer) ReadonlyTransaction(txn ReadonlyTransaction) TransactionFu
 func (mdb *MDBServer) ReadWriteTransaction(forceCommit bool, txn ReadWriteTransaction) TransactionFuture {
 	txnFuture := newReadWriteTransactionFuture(txn, forceCommit, mdb)
 	if !mdb.enqueueWriter(txnFuture) {
-		txnFuture.error = ServerTerminated
 		close(txnFuture.signal)
 	}
 	return txnFuture
@@ -167,7 +164,6 @@ func (mdb *MDBServer) ReadWriteTransaction(forceCommit bool, txn ReadWriteTransa
 func (mdb *MDBServer) WithEnv(fun func(*mdb.Env) (interface{}, error)) TransactionFuture {
 	future := newWithEnvFuture(fun, mdb)
 	if !mdb.enqueueWriter(future) {
-		future.error = ServerTerminated
 		close(future.signal)
 	}
 	return future
@@ -642,7 +638,7 @@ func (rtxn *RTxn) WithCursor(dbi *DBISettings, fun func(cursor *Cursor) interfac
 			return nil, err
 		}
 		defer cursor.Close()
-		return fun(&Cursor{RTxn: rtxn, cursor: cursor}), nil
+		return fun(&Cursor{RTxn: rtxn, cursor: cursor}), rtxn.error
 	}
 	return nil, rtxn.error
 }
