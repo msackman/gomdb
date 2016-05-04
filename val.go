@@ -21,6 +21,7 @@ type Val C.MDB_val
 func Wrap(p []byte) *Val {
 	l := C.size_t(len(p))
 	ptr := C.malloc(C.sizeof_MDB_val + l)
+	C.memset(ptr, 0, C.sizeof_MDB_val+l)
 	val := (*C.MDB_val)(ptr)
 	val.mv_size = l
 
@@ -33,7 +34,9 @@ func Wrap(p []byte) *Val {
 }
 
 func (v *Val) Free() {
-	C.free(unsafe.Pointer(v))
+	if v != nil {
+		C.free(unsafe.Pointer(v))
+	}
 }
 
 // If val is nil, a empty slice is retured.

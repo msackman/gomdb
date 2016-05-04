@@ -8,15 +8,30 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 )
 
-type ReadonlyTransaction func(rtxn *RTxn) (interface{}, error)
-type ReadWriteTransaction func(rwtxn *RWTxn) (interface{}, error)
+type ReadonlyTransaction func(rtxn *RTxn) interface{}
+type ReadWriteTransaction func(rwtxn *RWTxn) interface{}
 
 type DBISettings struct {
 	Flags uint
 	dbi   mdb.DBI
+	name  string
+}
+
+func (dbis *DBISettings) Clone() *DBISettings {
+	if dbis == nil {
+		return nil
+	} else {
+		return &DBISettings{Flags: dbis.Flags}
+	}
+}
+
+type DBIsInterface interface {
+	SetServer(*MDBServer)
+	Clone() DBIsInterface
 }
 
 type MDBServer struct {
@@ -46,21 +61,26 @@ type mdbQuery interface {
 
 type queryShutdown struct{}
 type queryInternalShutdown sync.WaitGroup
+type queryPause struct {
+	pause  *sync.WaitGroup
+	resume <-chan struct{}
+}
 
 func (qs *queryShutdown) mdbQueryWitness()                {}
 func (qis *queryInternalShutdown) mdbQueryWitness()       {}
+func (qp *queryPause) mdbQueryWitness()                   {}
 func (rotf *readonlyTransactionFuture) mdbQueryWitness()  {}
 func (rwtf *readWriteTransactionFuture) mdbQueryWitness() {}
 func (wef *withEnvFuture) mdbQueryWitness()               {}
 
 var (
-	ServerTerminated  = errors.New("Server already terminated")
 	NotAStructPointer = errors.New("Not a pointer to a struct")
 	UnexpectedMessage = errors.New("Unexpected message")
 	shutdownQuery     = &queryShutdown{}
 )
 
-func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, commitLatency time.Duration, dbiStruct interface{}) (*MDBServer, error) {
+func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, commitLatency time.Duration, dbiStruct DBIsInterface) (DBIsInterface, error) {
+	dbiStruct = dbiStruct.Clone()
 	if numReaders < 1 {
 		numReaders = runtime.GOMAXPROCS(0) / 2 // with 0, just returns current value
 		if numReaders < 1 {
@@ -118,7 +138,8 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 	go server.actor(path, openFlags, filemode, mapSize, dbiStruct, resultChan, writerHead, readerHead)
 	result := <-resultChan
 	if result == nil {
-		return server, nil
+		dbiStruct.SetServer(server)
+		return dbiStruct, nil
 	} else {
 		return nil, result
 	}
@@ -127,7 +148,6 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 func (mdb *MDBServer) ReadonlyTransaction(txn ReadonlyTransaction) TransactionFuture {
 	txnFuture := newReadonlyTransactionFuture(txn, mdb)
 	if !mdb.enqueueReader(txnFuture) {
-		txnFuture.error = ServerTerminated
 		close(txnFuture.signal)
 	}
 	return txnFuture
@@ -136,7 +156,6 @@ func (mdb *MDBServer) ReadonlyTransaction(txn ReadonlyTransaction) TransactionFu
 func (mdb *MDBServer) ReadWriteTransaction(forceCommit bool, txn ReadWriteTransaction) TransactionFuture {
 	txnFuture := newReadWriteTransactionFuture(txn, forceCommit, mdb)
 	if !mdb.enqueueWriter(txnFuture) {
-		txnFuture.error = ServerTerminated
 		close(txnFuture.signal)
 	}
 	return txnFuture
@@ -145,7 +164,6 @@ func (mdb *MDBServer) ReadWriteTransaction(forceCommit bool, txn ReadWriteTransa
 func (mdb *MDBServer) WithEnv(fun func(*mdb.Env) (interface{}, error)) TransactionFuture {
 	future := newWithEnvFuture(fun, mdb)
 	if !mdb.enqueueWriter(future) {
-		future.error = ServerTerminated
 		close(future.signal)
 	}
 	return future
@@ -173,12 +191,14 @@ func (mdb *MDBServer) enqueueWriter(msg mdbQuery) bool {
 	return mdb.writerCellTail.WithCell(f)
 }
 
-func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, initResult chan<- error, writerHead, readerHead *cc.ChanCellHead) {
+func (server *MDBServer) actor(path string, flags, mode uint, mapSize uint64, dbiStruct DBIsInterface, initResult chan<- error, writerHead, readerHead *cc.ChanCellHead) {
 	runtime.LockOSThread()
 	defer func() {
 		if server.env != nil {
-			server.env.Close()
+			server.handleShutdown()
 		}
+		server.writerCellTail.Terminate()
+		server.readerCellTail.Terminate()
 	}()
 	if err := server.init(path, flags, mode, mapSize, dbiStruct, readerHead); err != nil {
 		initResult <- err
@@ -226,9 +246,6 @@ func (server *MDBServer) actorLoop(writerHead *cc.ChanCellHead) {
 	if err = server.commitTxns(); err != nil {
 		log.Println(err)
 	}
-	server.writerCellTail.Terminate()
-	server.handleShutdown()
-	server.readerCellTail.Terminate()
 }
 
 func (server *MDBServer) handleQuery(query mdbQuery) (terminate bool, err error) {
@@ -253,9 +270,16 @@ func (server *MDBServer) handleShutdown() {
 		server.enqueueReader(is)
 	}
 	wg.Wait()
+
+	if err := server.env.Sync(1); err != nil {
+		log.Println("Error when flushing LMDB:", err)
+	}
+	if err := server.env.Close(); err != nil {
+		log.Println("Error when closing LMDB:", err)
+	}
 }
 
-func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbiStruct interface{}, readerHead *cc.ChanCellHead) error {
+func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbiStruct DBIsInterface, readerHead *cc.ChanCellHead) error {
 	env, err := mdb.NewEnv()
 	if err != nil {
 		return err
@@ -268,12 +292,12 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 		return err
 	}
 
-	dbiMap, err := analyzeDbiStruct(dbiStruct)
+	dbis, err := analyzeDbiStruct(dbiStruct)
 	if err != nil {
 		return err
 	}
 
-	if l := len(dbiMap); l != 0 {
+	if l := len(dbis); l != 0 {
 		if err = env.SetMaxDBs(mdb.DBI(l)); err != nil {
 			return err
 		}
@@ -287,8 +311,8 @@ func (server *MDBServer) init(path string, flags, mode uint, mapSize uint64, dbi
 	if err != nil {
 		return err
 	}
-	for name, value := range dbiMap {
-		dbi, err := txn.DBIOpen(&name, value.Flags)
+	for _, value := range dbis {
+		dbi, err := txn.DBIOpen(&value.name, value.Flags)
 		if err != nil {
 			txn.Abort()
 			return err
@@ -322,15 +346,13 @@ func (server *MDBServer) handleWithEnv(future *withEnvFuture) error {
 }
 
 func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) error {
-	/*
-		If creating a txn, or commiting a txn errors, then that kills both the txns and us.
-			If the txn func itself errors, that kills the txns, but it doesn't kill us.
-	*/
+	// Txns can not choose to abort. Thus any "errors" that occur are
+	// completely fatal to us.
 	var err error
 	server.batchedTxn = append(server.batchedTxn, txnFuture)
 	txn := server.txn
 	if txn == nil {
-		txn, err = server.env.BeginTxn(nil, 0)
+		txn, err = server.createTxn(0)
 		if err != nil {
 			server.txnsComplete(err)
 			return err
@@ -339,29 +361,87 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 	}
 	rwtxn := server.rwtxn
 	rwtxn.txn = txn
-	var txnErr error
-	if !txnFuture.forceCommit {
-		server.ensureTicker()
-	}
-	txnFuture.result, txnErr = txnFuture.txn(rwtxn)
-	if txnErr == nil {
+	rwtxn.error = nil
+	txnFuture.result = txnFuture.txn(rwtxn)
+	err = rwtxn.error
+	switch err {
+	case nil:
 		if txnFuture.forceCommit {
 			err = server.commitTxns()
+		} else {
+			server.ensureTicker()
 		}
-	} else {
+
+	case mdb.MapFull:
 		txn.Abort()
-		server.txnsComplete(txnErr)
+		server.txn = nil
+		err = server.expandMap()
+
+	default:
+		txnFuture.error = err
+		txn.Abort()
+		server.txn = nil
+		server.txnsComplete(err)
 	}
 	return err
 }
 
+func (server *MDBServer) expandMap() error {
+	info, err := server.env.Info()
+	if err == nil {
+		resume := make(chan struct{})
+		pauser := &queryPause{
+			pause:  new(sync.WaitGroup),
+			resume: resume,
+		}
+		pauser.pause.Add(len(server.readers))
+		for range server.readers {
+			server.enqueueReader(pauser)
+		}
+		pauser.pause.Wait()
+
+		mapSize := info.MapSize * 2
+		log.Println("New map size:", mapSize)
+		err = server.env.SetMapSize(mapSize)
+		close(resume)
+
+		if err == nil {
+			txns := make([]*readWriteTransactionFuture, len(server.batchedTxn))
+			copy(txns, server.batchedTxn)
+			server.batchedTxn = server.batchedTxn[:0]
+			for idx, txnFuture := range txns {
+				err = server.handleRunTxn(txnFuture)
+				if err != nil {
+					server.batchedTxn = append(server.batchedTxn, txns[idx+1:]...)
+					server.txnsComplete(err)
+					break
+				}
+			}
+		}
+	}
+	return err
+}
+
+func (server *MDBServer) createTxn(flags uint) (*mdb.Txn, error) {
+	for {
+		txn, err := server.env.BeginTxn(nil, flags)
+		if err == mdb.MapResized {
+			err = server.env.SetMapSize(0)
+			if err == nil {
+				continue
+			}
+		}
+		return txn, err
+	}
+}
+
 func (server *MDBServer) txnsComplete(err error) {
 	server.txn = nil
+	server.cancelTicker()
 	for _, txnFuture := range server.batchedTxn {
 		txnFuture.error = err
 		close(txnFuture.signal)
 	}
-	server.cancelTicker()
 	server.batchedTxn = server.batchedTxn[:0]
 }
 
@@ -384,15 +464,21 @@ func (server *MDBServer) commitTxns() error {
 		return nil
 	} else {
 		err := server.txn.Commit()
-		server.txnsComplete(err)
-		return err
+		if err == mdb.MapFull {
+			server.txn = nil
+			return server.expandMap()
+
+		} else {
+			server.txnsComplete(err)
+			return err
+		}
 	}
 }
 
-func analyzeDbiStruct(dbiStruct interface{}) (map[string]*DBISettings, error) {
-	m := make(map[string]*DBISettings)
+func analyzeDbiStruct(dbiStruct DBIsInterface) ([]*DBISettings, error) {
+	l := []*DBISettings{}
 	if dbiStruct == nil {
-		return m, nil
+		return l, nil
 	}
 
 	t := reflect.TypeOf(dbiStruct)
@@ -415,27 +501,41 @@ func analyzeDbiStruct(dbiStruct interface{}) (map[string]*DBISettings, error) {
 		fieldValue := v.Field(idx)
 		if dbiSettingsType.AssignableTo(field.Type) && fieldValue.CanSet() &&
 			fieldValue.CanInterface() && !fieldValue.IsNil() {
-			m[field.Name] = fieldValue.Interface().(*DBISettings)
+			dbis := fieldValue.Interface().(*DBISettings)
+			dbis.name = field.Name
+			l = append(l, dbis)
 		}
 	}
-	return m, nil
+	return l, nil
 }
 
 func (reader *mdbReader) actorLoop(readerHead *cc.ChanCellHead) {
 	runtime.LockOSThread()
 	var (
-		err        error
 		readerChan <-chan mdbQuery
 		readerCell *cc.ChanCell
 	)
 	chanFun := func(cell *cc.ChanCell) { readerChan, readerCell = reader.server.readerChan, cell }
 	readerHead.WithCell(chanFun)
-	terminate := false
+
+	txn, err := reader.server.createTxn(mdb.RDONLY)
+	if err == nil {
+		reader.rtxn.txn = txn
+	}
+	terminate := err != nil
 	for !terminate {
 		if query, ok := <-readerChan; ok {
 			switch msg := query.(type) {
 			case *readonlyTransactionFuture:
 				err = reader.handleRunTxn(msg)
+			case *queryPause:
+				txn := reader.rtxn.txn
+				if txn != nil {
+					txn.Abort()
+					reader.rtxn.txn = nil
+				}
+				msg.pause.Done()
+				<-msg.resume
 			case *queryInternalShutdown:
 				((*sync.WaitGroup)(msg)).Done()
 				terminate = true
@@ -454,50 +554,168 @@ func (reader *mdbReader) actorLoop(readerHead *cc.ChanCellHead) {
 
 func (reader *mdbReader) handleRunTxn(txnFuture *readonlyTransactionFuture) error {
 	defer close(txnFuture.signal)
-	txn, err := reader.server.env.BeginTxn(nil, mdb.RDONLY)
+	rtxn := reader.rtxn
+	var err error
+	if rtxn.txn != nil {
+		err = rtxn.txn.Renew()
+		if err == mdb.Invalid || err == syscall.EINVAL {
+			rtxn.txn.Abort()
+			rtxn.txn = nil
+		}
+	}
+	if rtxn.txn == nil {
+		rtxn.txn, err = reader.server.createTxn(mdb.RDONLY)
+	}
 	if err != nil {
+		rtxn.txn = nil
 		txnFuture.error = err
 		return err
 	}
-	rtxn := reader.rtxn
-	rtxn.txn = txn
-	txnFuture.result, txnFuture.error = txnFuture.txn(rtxn)
-	txn.Abort()
+
+	rtxn.error = nil
+	txnFuture.result = txnFuture.txn(rtxn)
+	txnFuture.error = rtxn.error
+	rtxn.txn.Reset()
 	return nil
 }
 
 type RTxn struct {
-	txn *mdb.Txn
+	txn   *mdb.Txn
+	error error
 }
 
-func (rtxn *RTxn) Reset()                                           { rtxn.txn.Reset() }
-func (rtxn *RTxn) Renew() error                                     { return rtxn.txn.Renew() }
-func (rtxn *RTxn) Get(dbi *DBISettings, key []byte) ([]byte, error) { return rtxn.txn.Get(dbi.dbi, key) }
+func (rtxn *RTxn) Error(err error) error {
+	if rtxn.error == nil {
+		rtxn.error = err
+	}
+	return rtxn.error
+}
+
+func (rtxn *RTxn) Reset() error {
+	if rtxn.error == nil {
+		rtxn.txn.Reset()
+	}
+	return rtxn.error
+}
+
+func (rtxn *RTxn) Renew() error {
+	if rtxn.error == nil {
+		rtxn.error = rtxn.txn.Renew()
+	}
+	return rtxn.error
+}
+
+func (rtxn *RTxn) Get(dbi *DBISettings, key []byte) ([]byte, error) {
+	if rtxn.error == nil {
+		result, err := rtxn.txn.Get(dbi.dbi, key)
+		if err != nil && err != mdb.NotFound {
+			rtxn.error = err
+		}
+		return result, err
+	} else {
+		return nil, rtxn.error
+	}
+}
 
 // Do NOT call Free() on the result *mdb.Val
 func (rtxn *RTxn) GetVal(dbi *DBISettings, key []byte) (*mdb.Val, error) {
-	return rtxn.txn.GetVal(dbi.dbi, key)
+	if rtxn.error == nil {
+		result, err := rtxn.txn.GetVal(dbi.dbi, key)
+		if err != nil && err != mdb.NotFound {
+			rtxn.error = err
+		}
+		return result, err
+	} else {
+		return nil, rtxn.error
+	}
 }
 
-func (rtxn *RTxn) WithCursor(dbi *DBISettings, fun func(cursor *mdb.Cursor) (interface{}, error)) (interface{}, error) {
-	cursor, err := rtxn.txn.CursorOpen(dbi.dbi)
-	if err != nil {
-		return nil, err
+func (rtxn *RTxn) WithCursor(dbi *DBISettings, fun func(cursor *Cursor) interface{}) (interface{}, error) {
+	if rtxn.error == nil {
+		cursor, err := rtxn.txn.CursorOpen(dbi.dbi)
+		if err != nil {
+			rtxn.error = err
+			return nil, err
+		}
+		defer cursor.Close()
+		return fun(&Cursor{RTxn: rtxn, cursor: cursor}), rtxn.error
 	}
-	defer cursor.Close()
-	return fun(cursor)
+	return nil, rtxn.error
+}
+
+type Cursor struct {
+	*RTxn
+	cursor *mdb.Cursor
+}
+
+func (c *Cursor) Get(key, val []byte, op uint) ([]byte, []byte, error) {
+	if c.error == nil {
+		rkey, rVal, err := c.cursor.Get(key, val, op)
+		if err != nil && err != mdb.NotFound {
+			c.error = err
+		}
+		return rkey, rVal, err
+	}
+	return nil, nil, c.error
+}
+
+// Caller's responsibility to call Free() on return key and value iff non-nil
+func (c *Cursor) GetVal(key, val []byte, op uint) (*mdb.Val, *mdb.Val, error) {
+	if c.error == nil {
+		rkey, rVal, err := c.cursor.GetVal(key, val, op)
+		if err != nil && err != mdb.NotFound {
+			c.error = err
+		}
+		return rkey, rVal, err
+	}
+	return nil, nil, c.error
+}
+
+func (c *Cursor) Put(key, val []byte, flags uint) error {
+	if c.error == nil {
+		c.error = c.cursor.Put(key, val, flags)
+	}
+	return c.error
+}
+
+func (c *Cursor) Del(flags uint) error {
+	if c.error == nil {
+		err := c.cursor.Del(flags)
+		if err != nil && err != mdb.NotFound {
+			c.error = err
+		}
+		return err
+	}
+	return c.error
 }
 
 type RWTxn struct {
 	RTxn
 }
 
-func (rwtxn *RWTxn) Drop(dbi *DBISettings, del int) error { return rwtxn.txn.Drop(dbi.dbi, del) }
-func (rwtxn *RWTxn) Put(dbi *DBISettings, key, val []byte, flags uint) error {
-	return rwtxn.txn.Put(dbi.dbi, key, val, flags)
+func (rwtxn *RWTxn) Drop(dbi *DBISettings, del int) error {
+	if rwtxn.error == nil {
+		rwtxn.error = rwtxn.txn.Drop(dbi.dbi, del)
+	}
+	return rwtxn.error
 }
+
+func (rwtxn *RWTxn) Put(dbi *DBISettings, key, val []byte, flags uint) error {
+	if rwtxn.error == nil {
+		rwtxn.error = rwtxn.txn.Put(dbi.dbi, key, val, flags)
+	}
+	return rwtxn.error
+}
+
 func (rwtxn *RWTxn) Del(dbi *DBISettings, key, val []byte) error {
-	return rwtxn.txn.Del(dbi.dbi, key, val)
+	if rwtxn.error == nil {
+		err := rwtxn.txn.Del(dbi.dbi, key, val)
+		if err != nil && err != mdb.NotFound {
+			rwtxn.error = err
+		}
+		return err
+	}
+	return rwtxn.error
 }
 
 type TransactionFuture interface {

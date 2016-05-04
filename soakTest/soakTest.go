@@ -16,13 +16,22 @@ import (
 )
 
 type DBs struct {
+	*mdbs.MDBServer
 	Test *mdbs.DBISettings
+}
+
+func (dbs *DBs) Clone() mdbs.DBIsInterface {
+	return &DBs{Test: dbs.Test.Clone()}
+}
+
+func (dbs *DBs) SetServer(server *mdbs.MDBServer) {
+	dbs.MDBServer = server
 }
 
 const (
 	keySize   = 16
 	valSize   = 96
-	terabyte  = 1099511627776
+	mapSize   = 10485760
 	openFlags = mdb.WRITEMAP //| mdb.MAPASYNC // try |mdb.MAPASYNC for ludicrous speed
 )
 
@@ -63,14 +72,15 @@ func main() {
 	dbs := &DBs{
 		Test: &mdbs.DBISettings{Flags: mdb.CREATE | mdb.INTEGERKEY},
 	}
-	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, terabyte, 0, 2*time.Millisecond, dbs)
+	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, mapSize, 0, 2*time.Millisecond, dbs)
 	if err != nil {
 		log.Fatal("Cannot start server:", err)
 	}
-	defer server.Shutdown()
+	dbs = server.(*DBs)
+	defer dbs.Shutdown()
 
 	popStart := time.Now()
-	if err = populate(records, server, dbs); err != nil {
+	if err = populate(records, dbs); err != nil {
 		log.Fatal(err)
 	}
 	popEnd := time.Now()
@@ -79,11 +89,11 @@ func main() {
 	log.Println("Populating DB with", records, "records took", popTime, "(", popRate, "records/sec )")
 
 	for idx := 0; idx < readers; idx++ {
-		go worker(int64(records), server, dbs, readers, idx, false)
+		go worker(int64(records), dbs, readers, idx, false)
 	}
 
 	if rewriter {
-		go worker(int64(records), server, dbs, 1, -1, true)
+		go worker(int64(records), dbs, 1, -1, true)
 	}
 
 	sigs := make(chan os.Signal, 1)
@@ -91,23 +101,23 @@ func main() {
 	<-sigs
 }
 
-func populate(records int, server *mdbs.MDBServer, dbs *DBs) error {
+func populate(records int, dbs *DBs) error {
 	key := make([]byte, keySize)
 	val := make([]byte, valSize)
-	_, err := server.ReadWriteTransaction(false, func(txn *mdbs.RWTxn) (interface{}, error) {
+	_, err := dbs.ReadWriteTransaction(false, func(txn *mdbs.RWTxn) interface{} {
 		for idx := 0; idx < records; idx++ {
 			int64ToBytes(int64(idx), key)
 			int64ToBytes(int64(idx), val)
 			if err := txn.Put(dbs.Test, key, val, 0); err != nil {
-				return nil, err
+				return nil
 			}
 		}
-		return nil, nil
+		return nil
 	}).ResultError()
 	return err
 }
 
-func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, write bool) error {
+func worker(records int64, dbs *DBs, readers, id int, write bool) error {
 	msg := fmt.Sprint(id, ": Read")
 	if write {
 		msg = ": Wrote"
@@ -132,17 +142,18 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 				key := make([]byte, keySize)
 				int64ToBytes(keyNum, key)
 				forceFlush := keyNum%10 == 0
-				future := server.ReadWriteTransaction(forceFlush, func(txn *mdbs.RWTxn) (interface{}, error) {
+				future := dbs.ReadWriteTransaction(forceFlush, func(txn *mdbs.RWTxn) interface{} {
 					val, err1 := txn.Get(dbs.Test, key)
 					if err1 != nil {
-						return nil, err1
+						return nil
 					}
 					num := bytesToInt64(val)
 					if num < keyNum {
-						return nil, fmt.Errorf("Expected val (%v) >= key (%v)", num, keyNum)
+						panic(fmt.Errorf("Expected val (%v) >= key (%v)", num, keyNum))
 					}
 					int64ToBytes(num+1, val)
-					return nil, txn.Put(dbs.Test, key, val, 0)
+					txn.Put(dbs.Test, key, val, 0)
+					return nil
 				})
 				if forceFlush {
 					_, err = future.ResultError()
@@ -151,16 +162,16 @@ func worker(records int64, server *mdbs.MDBServer, dbs *DBs, readers, id int, wr
 				keyNum := randSource.Int63n(records)
 				key := make([]byte, keySize)
 				int64ToBytes(keyNum, key)
-				_, err = server.ReadonlyTransaction(func(txn *mdbs.RTxn) (interface{}, error) {
+				_, err = dbs.ReadonlyTransaction(func(txn *mdbs.RTxn) interface{} {
 					val, err1 := txn.GetVal(dbs.Test, key)
 					if err1 != nil {
-						return nil, err1
+						return nil
 					}
 					num := bytesToInt64(val.BytesNoCopy())
 					if num < keyNum {
-						return nil, fmt.Errorf("Expected val (%v) >= key (%v)", num, keyNum)
+						panic(fmt.Errorf("Expected val (%v) >= key (%v)", num, keyNum))
 					}
-					return nil, nil
+					return nil
 				}).ResultError()
 			}
 			if err != nil {
