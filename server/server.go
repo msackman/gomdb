@@ -374,19 +374,17 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 
 	case mdb.MapFull:
 		txn.Abort()
-		server.txn = nil
 		err = server.expandMap()
 
 	default:
-		txnFuture.error = err
 		txn.Abort()
-		server.txn = nil
 		server.txnsComplete(err)
 	}
 	return err
 }
 
 func (server *MDBServer) expandMap() error {
+	server.txn = nil
 	info, err := server.env.Info()
 	if err == nil {
 		resume := make(chan struct{})
@@ -406,18 +404,20 @@ func (server *MDBServer) expandMap() error {
 		close(resume)
 
 		if err == nil {
-			txns := make([]*readWriteTransactionFuture, len(server.batchedTxn))
-			copy(txns, server.batchedTxn)
-			server.batchedTxn = server.batchedTxn[:0]
-			for idx, txnFuture := range txns {
-				err = server.handleRunTxn(txnFuture)
-				if err != nil {
-					server.batchedTxn = append(server.batchedTxn, txns[idx+1:]...)
-					server.txnsComplete(err)
-					break
+			txns := server.batchedTxn
+			// handleRunTxn will add them back in to batchedTxn
+			server.batchedTxn = make([]*readWriteTransactionFuture, 0, len(txns))
+			for _, txnFuture := range txns {
+				if err = server.handleRunTxn(txnFuture); err != nil {
+					// if there was an error, handleRunTxn will have called
+					// txnsComplete already.
+					return err
 				}
 			}
 		}
+	}
+	if err != nil {
+		server.txnsComplete(err)
 	}
 	return err
 }
@@ -438,7 +438,8 @@ func (server *MDBServer) createTxn(flags uint) (*mdb.Txn, error) {
 func (server *MDBServer) txnsComplete(err error) {
 	server.txn = nil
 	server.cancelTicker()
-	for _, txnFuture := range server.batchedTxn {
+	for idx, txnFuture := range server.batchedTxn {
+		server.batchedTxn[idx] = nil
 		txnFuture.error = err
 		close(txnFuture.signal)
 	}
@@ -465,7 +466,6 @@ func (server *MDBServer) commitTxns() error {
 	} else {
 		err := server.txn.Commit()
 		if err == mdb.MapFull {
-			server.txn = nil
 			return server.expandMap()
 
 		} else {
