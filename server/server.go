@@ -2,11 +2,13 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	cc "github.com/msackman/chancell"
 	mdb "github.com/msackman/gomdb"
 	"log"
 	"reflect"
 	"runtime"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -48,6 +50,8 @@ type MDBServer struct {
 	txn                     *mdb.Txn
 	ticker                  *time.Ticker
 	txnDuration             time.Duration
+	async                   bool
+	timeChan                chan *time.Time
 }
 
 type mdbReader struct {
@@ -79,10 +83,43 @@ var (
 	shutdownQuery     = &queryShutdown{}
 )
 
+type sortableTime []*time.Time
+
+func (st sortableTime) Len() int {
+	return len(st)
+}
+
+func (st sortableTime) Less(i, j int) bool {
+	return st[i].Before(*st[j])
+}
+
+func (st sortableTime) Swap(i, j int) {
+	st[i], st[j] = st[j], st[i]
+}
+
+func (st sortableTime) Sort() {
+	sort.Sort(st)
+}
+
+func (st sortableTime) Intervals(intervals []uint64) {
+	if len(st) < 2 {
+		return
+	}
+	st.Sort()
+	cur := st[0]
+	for idx, l := 1, len(st); idx < l; idx++ {
+		next := st[idx]
+		intervals = append(intervals, uint64(next.Sub(*cur)))
+		cur = next
+	}
+	fmt.Println("")
+	fmt.Println(intervals)
+}
+
 func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, commitLatency time.Duration, dbiStruct DBIsInterface) (DBIsInterface, error) {
 	dbiStruct = dbiStruct.Clone()
 	if numReaders < 1 {
-		numReaders = runtime.GOMAXPROCS(0) / 2 // with 0, just returns current value
+		numReaders = runtime.GOMAXPROCS(0) // / 2 // with 0, just returns current value
 		if numReaders < 1 {
 			numReaders = 1
 		}
@@ -92,8 +129,29 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 		rwtxn:       &RWTxn{},
 		batchedTxn:  make([]*readWriteTransactionFuture, 0, 32), // MAGIC NUMBER
 		txnDuration: commitLatency,
+		async:       false,
+		timeChan:    make(chan *time.Time, 1000000),
 	}
-
+	/*
+		go func() {
+			timesSorted := sortableTime(make([]*time.Time, 0, 1000000))
+			intervals := make([]uint64, 0, 1000000)
+			for {
+				time.Sleep(time.Second * 30)
+				for finished := false; !finished; {
+					select {
+					case t := <-server.timeChan:
+						timesSorted = append(timesSorted, t)
+					default:
+						finished = true
+					}
+				}
+				timesSorted.Intervals(intervals)
+				timesSorted = timesSorted[:0]
+				intervals = intervals[:0]
+			}
+		}()
+	*/
 	var writerHead *cc.ChanCellHead
 	writerHead, server.writerCellTail = cc.NewChanCellTail(
 		func(n int, cell *cc.ChanCell) {
@@ -155,9 +213,11 @@ func (mdb *MDBServer) ReadonlyTransaction(txn ReadonlyTransaction) TransactionFu
 
 func (mdb *MDBServer) ReadWriteTransaction(forceCommit bool, txn ReadWriteTransaction) TransactionFuture {
 	txnFuture := newReadWriteTransactionFuture(txn, forceCommit, mdb)
+	//now := time.Now()
 	if !mdb.enqueueWriter(txnFuture) {
 		close(txnFuture.signal)
 	}
+	//mdb.timeChan <- &now
 	return txnFuture
 }
 
@@ -226,16 +286,21 @@ func (server *MDBServer) actorLoop(writerHead *cc.ChanCellHead) {
 			}
 		} else {
 			select {
-			case query, ok := <-writerChan:
-				if ok {
-					terminate, err = server.handleQuery(query)
-				} else {
-					writerHead.Next(writerCell, chanFun)
-				}
 			case <-server.ticker.C:
 				err = server.commitTxns()
 			default:
-				err = server.commitTxns()
+				select {
+				case query, ok := <-writerChan:
+					if ok {
+						terminate, err = server.handleQuery(query)
+					} else {
+						writerHead.Next(writerCell, chanFun)
+					}
+				case <-server.ticker.C:
+					err = server.commitTxns()
+				default:
+					err = server.commitTxns()
+				}
 			}
 		}
 		terminate = terminate || err != nil
@@ -366,7 +431,7 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 	err = rwtxn.error
 	switch err {
 	case nil:
-		if txnFuture.forceCommit {
+		if txnFuture.forceCommit || server.async {
 			err = server.commitTxns()
 		} else {
 			server.ensureTicker()
@@ -438,6 +503,7 @@ func (server *MDBServer) createTxn(flags uint) (*mdb.Txn, error) {
 func (server *MDBServer) txnsComplete(err error) {
 	server.txn = nil
 	server.cancelTicker()
+	//fmt.Printf("%d ", len(server.batchedTxn))
 	for idx, txnFuture := range server.batchedTxn {
 		server.batchedTxn[idx] = nil
 		txnFuture.error = err
@@ -464,11 +530,13 @@ func (server *MDBServer) commitTxns() error {
 	if server.txn == nil {
 		return nil
 	} else {
+		//start := time.Now()
 		err := server.txn.Commit()
 		if err == mdb.MapFull {
 			return server.expandMap()
 
 		} else {
+			//fmt.Printf("%d(%v) ", len(server.batchedTxn), time.Now().Sub(start))
 			server.txnsComplete(err)
 			return err
 		}
@@ -553,7 +621,6 @@ func (reader *mdbReader) actorLoop(readerHead *cc.ChanCellHead) {
 }
 
 func (reader *mdbReader) handleRunTxn(txnFuture *readonlyTransactionFuture) error {
-	defer close(txnFuture.signal)
 	rtxn := reader.rtxn
 	var err error
 	if rtxn.txn != nil {
@@ -569,12 +636,14 @@ func (reader *mdbReader) handleRunTxn(txnFuture *readonlyTransactionFuture) erro
 	if err != nil {
 		rtxn.txn = nil
 		txnFuture.error = err
+		close(txnFuture.signal)
 		return err
 	}
 
 	rtxn.error = nil
 	txnFuture.result = txnFuture.txn(rtxn)
 	txnFuture.error = rtxn.error
+	close(txnFuture.signal)
 	rtxn.txn.Reset()
 	return nil
 }
