@@ -3,9 +3,9 @@ package server
 import (
 	"errors"
 	"fmt"
+	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
 	mdb "github.com/msackman/gomdb"
-	"log"
 	"reflect"
 	"runtime"
 	"sort"
@@ -37,6 +37,7 @@ type DBIsInterface interface {
 }
 
 type MDBServer struct {
+	logger                  log.Logger
 	writerCellTail          *cc.ChanCellTail
 	writerEnqueueQueryInner func(mdbQuery, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	writerChan              <-chan mdbQuery
@@ -117,12 +118,13 @@ func (st sortableTime) Intervals(intervals []uint64) {
 	fmt.Println(intervals)
 }
 
-func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, commitLatency time.Duration, dbiStruct DBIsInterface) (DBIsInterface, error) {
+func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numReaders int, commitLatency time.Duration, dbiStruct DBIsInterface, logger log.Logger) (DBIsInterface, error) {
 	dbiStruct = dbiStruct.Clone()
 	if numReaders < 1 {
 		numReaders = (runtime.GOMAXPROCS(0) + 1) >> 1 // with 0, just returns current value
 	}
 	server := &MDBServer{
+		logger:      log.NewContext(logger).With("subsystem", "mdbs"),
 		readers:     make([]*mdbReader, numReaders),
 		rwtxn:       &RWTxn{},
 		batchedTxn:  make([]*readWriteTransactionFuture, 0, 32), // MAGIC NUMBER
@@ -314,10 +316,10 @@ func (server *MDBServer) actorLoop(writerHead *cc.ChanCellHead) {
 		terminate = terminate || err != nil
 	}
 	if err != nil {
-		log.Println(err)
+		server.logger.Log("msg", "Fatal error in writer.", "error", err)
 	}
 	if err = server.commitTxns(); err != nil {
-		log.Println(err)
+		server.logger.Log("msg", "Error during final commit.", "error", err)
 	}
 }
 
@@ -345,10 +347,10 @@ func (server *MDBServer) handleShutdown() {
 	wg.Wait()
 
 	if err := server.env.Sync(1); err != nil {
-		log.Println("Error when flushing LMDB:", err)
+		server.logger.Log("msg", "Error on shutdown when syncing.", "error", err)
 	}
 	if err := server.env.Close(); err != nil {
-		log.Println("Error when closing LMDB:", err)
+		server.logger.Log("msg", "Error on shutdown when closing.", "error", err)
 	}
 }
 
@@ -472,7 +474,7 @@ func (server *MDBServer) expandMap() error {
 		pauser.pause.Wait()
 
 		mapSize := info.MapSize * 2
-		log.Println("New map size:", mapSize)
+		server.logger.Log("msg", "New map size.", "size", mapSize)
 		err = server.env.SetMapSize(mapSize)
 		close(resume)
 
@@ -631,7 +633,7 @@ func (reader *mdbReader) actorLoop(readerHead *cc.ChanCellHead) {
 		terminate = terminate || err != nil
 	}
 	if err != nil {
-		log.Println(err)
+		reader.server.logger.Log("msg", "Fatal error in reader.", "error", err)
 	}
 }
 
