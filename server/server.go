@@ -51,9 +51,12 @@ type MDBServer struct {
 	txn                     *mdb.Txn
 	ticker                  *time.Ticker
 	txnDuration             time.Duration
-	async                   bool
+	// async                   bool
 	// timeChan                chan *time.Time
 	// commitIntervals         []int64
+	// processIntervals []int64
+	// batchFsync map[int][]int64
+	// boot       time.Time
 }
 
 type mdbReader struct {
@@ -124,14 +127,17 @@ func NewMDBServer(path string, openFlags, filemode uint, mapSize uint64, numRead
 		numReaders = (runtime.GOMAXPROCS(0) + 1) >> 1 // with 0, just returns current value
 	}
 	server := &MDBServer{
-		logger:      log.NewContext(logger).With("subsystem", "mdbs"),
+		logger:      log.With(logger, "subsystem", "mdbs"),
 		readers:     make([]*mdbReader, numReaders),
 		rwtxn:       &RWTxn{},
 		batchedTxn:  make([]*readWriteTransactionFuture, 0, 32), // MAGIC NUMBER
 		txnDuration: commitLatency,
-		async:       false,
+		// async:       false,
 		// timeChan:        make(chan *time.Time, 1000000),
 		// commitIntervals: make([]int64, 0, 50000),
+		// processIntervals: make([]int64, 0, 50000),
+		// batchFsync: make(map[int][]int64, 1000),
+		// boot:       time.Now(),
 	}
 
 	/*
@@ -434,14 +440,25 @@ func (server *MDBServer) handleRunTxn(txnFuture *readWriteTransactionFuture) err
 		}
 		server.txn = txn
 	}
+
 	rwtxn := server.rwtxn
 	rwtxn.txn = txn
 	rwtxn.error = nil
+	//	start := time.Now()
 	txnFuture.result = txnFuture.txn(rwtxn)
+
 	err = rwtxn.error
 	switch err {
 	case nil:
-		if txnFuture.forceCommit || server.async {
+		/*
+			elapsed := time.Now().Sub(start)
+			server.processIntervals = append(server.processIntervals, int64(elapsed))
+			if len(server.processIntervals)%25000 == 0 {
+				fmt.Print(server.processIntervals)
+				server.processIntervals = server.processIntervals[:0]
+			}
+		*/
+		if txnFuture.forceCommit { // || server.async {
 			err = server.commitTxns()
 		} else {
 			server.ensureTicker()
@@ -548,11 +565,21 @@ func (server *MDBServer) commitTxns() error {
 		} else {
 			/*
 				elapsed := time.Now().Sub(start)
-				server.commitIntervals = append(server.commitIntervals, int64(elapsed))
-				if len(server.commitIntervals)%7000 == 0 {
-					fmt.Print(server.commitIntervals)
-					server.commitIntervals = server.commitIntervals[:0]
+				batchSize := len(server.batchedTxn)
+				slice, found := server.batchFsync[batchSize]
+				if !found {
+					slice = make([]int64, 0, 1000)
 				}
+				server.batchFsync[batchSize] = append(slice, int64(elapsed))
+				if server.boot.Add(time.Minute).Before(start) {
+					fmt.Print(server.batchFsync)
+					server.boot = start
+				}
+					server.commitIntervals = append(server.commitIntervals, int64(elapsed))
+					if len(server.commitIntervals)%7000 == 0 {
+						fmt.Print(server.commitIntervals)
+						server.commitIntervals = server.commitIntervals[:0]
+					}
 			*/
 			server.txnsComplete(err)
 			return err
