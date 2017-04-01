@@ -3,10 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/go-kit/kit/log"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"io/ioutil"
-	"log"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -32,13 +32,13 @@ const (
 	keySize   = 16
 	valSize   = 96
 	mapSize   = 10485760
-	openFlags = mdb.WRITEMAP //| mdb.MAPASYNC // try |mdb.MAPASYNC for ludicrous speed
+	openFlags = 0 // | mdb.NOSYNC // try | mdb.NOSYNC for ludicrous speed
 )
 
 func main() {
-	log.SetPrefix("MDB Soak Test ")
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Println(os.Args)
+	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
+	logger = log.With(logger, "ts", log.DefaultTimestampUTC)
+	logger.Log("args", fmt.Sprint(os.Args))
 
 	procs := runtime.NumCPU()
 	if procs < 2 {
@@ -55,45 +55,49 @@ func main() {
 	flag.Parse()
 
 	if records < 1 || readers < 0 {
-		log.Fatal("records must be > 0 and readers must be >= 0")
+		logger.Log("error", "records must be > 0 and readers must be >= 0")
+		os.Exit(1)
 	}
 
 	dir, err := ioutil.TempDir("", "mdb_soak_test")
 	if err != nil {
-		log.Fatal("Cannot create temporary directory")
+		logger.Log("error", fmt.Sprintf("Cannot create temporary directory: %v", err))
+		os.Exit(1)
 	}
 	defer os.RemoveAll(dir)
 	err = os.MkdirAll(dir, 0770)
 	if err != nil {
-		log.Fatal("Cannot create directory:", dir)
+		logger.Log("error", fmt.Sprintf("Cannot create directory: %v", err), "dir", dir)
 	}
-	log.Println("Using dir", dir)
+	logger.Log("dir", dir)
 
 	dbs := &DBs{
 		Test: &mdbs.DBISettings{Flags: mdb.CREATE | mdb.INTEGERKEY},
 	}
-	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, mapSize, 0, 2*time.Millisecond, dbs)
+	server, err := mdbs.NewMDBServer(dir, openFlags, 0600, mapSize, time.Millisecond, dbs, logger)
 	if err != nil {
-		log.Fatal("Cannot start server:", err)
+		logger.Log("error", err, "msg", "Cannot start server.")
 	}
 	dbs = server.(*DBs)
 	defer dbs.Shutdown()
 
 	popStart := time.Now()
 	if err = populate(records, dbs); err != nil {
-		log.Fatal(err)
+		logger.Log("error", err)
+		os.Exit(1)
 	}
 	popEnd := time.Now()
 	popTime := popEnd.Sub(popStart)
 	popRate := float64(int64(records)*time.Second.Nanoseconds()) / float64(popTime.Nanoseconds())
-	log.Println("Populating DB with", records, "records took", popTime, "(", popRate, "records/sec )")
+	logger.Log("msg", fmt.Sprintf("Populating DB with %d records took %v (%v records/sec)",
+		records, popTime, popRate))
 
 	for idx := 0; idx < readers; idx++ {
-		go worker(int64(records), dbs, readers, idx, false)
+		go worker(logger, int64(records), dbs, readers, idx, false)
 	}
 
 	if rewriter {
-		go worker(int64(records), dbs, 1, -1, true)
+		go worker(logger, int64(records), dbs, 1, 0, true)
 	}
 
 	sigs := make(chan os.Signal, 1)
@@ -104,7 +108,7 @@ func main() {
 func populate(records int, dbs *DBs) error {
 	key := make([]byte, keySize)
 	val := make([]byte, valSize)
-	_, err := dbs.ReadWriteTransaction(false, func(txn *mdbs.RWTxn) interface{} {
+	_, err := dbs.ReadWriteTransaction(func(txn *mdbs.RWTxn) interface{} {
 		for idx := 0; idx < records; idx++ {
 			int64ToBytes(int64(idx), key)
 			int64ToBytes(int64(idx), val)
@@ -117,10 +121,11 @@ func populate(records int, dbs *DBs) error {
 	return err
 }
 
-func worker(records int64, dbs *DBs, readers, id int, write bool) error {
-	msg := fmt.Sprint(id, ": Read")
+func worker(logger log.Logger, records int64, dbs *DBs, readers, id int, write bool) error {
 	if write {
-		msg = ": Wrote"
+		logger = log.With(logger, "writer", id)
+	} else {
+		logger = log.With(logger, "reader", id)
 	}
 	start := time.Now()
 	count := 0
@@ -133,7 +138,7 @@ func worker(records int64, dbs *DBs, readers, id int, write bool) error {
 			now := time.Now()
 			elapsed := now.Sub(start)
 			rate := float64(int64(count)*time.Second.Nanoseconds()) / float64(elapsed.Nanoseconds())
-			log.Println(msg, count, "records in", elapsed, "(", rate, "records/sec )")
+			logger.Log("msg", fmt.Sprintf("%d records, in %v (%v records/sec)", count, elapsed, rate))
 			start = now
 			count = 0
 		default:
@@ -141,8 +146,7 @@ func worker(records int64, dbs *DBs, readers, id int, write bool) error {
 				keyNum := randSource.Int63n(records)
 				key := make([]byte, keySize)
 				int64ToBytes(keyNum, key)
-				forceFlush := keyNum%10 == 0
-				future := dbs.ReadWriteTransaction(forceFlush, func(txn *mdbs.RWTxn) interface{} {
+				_, err = dbs.ReadWriteTransaction(func(txn *mdbs.RWTxn) interface{} {
 					val, err1 := txn.Get(dbs.Test, key)
 					if err1 != nil {
 						return nil
@@ -154,10 +158,7 @@ func worker(records int64, dbs *DBs, readers, id int, write bool) error {
 					int64ToBytes(num+1, val)
 					txn.Put(dbs.Test, key, val, 0)
 					return nil
-				})
-				if forceFlush {
-					_, err = future.ResultError()
-				}
+				}).ResultError()
 			} else {
 				keyNum := randSource.Int63n(records)
 				key := make([]byte, keySize)
@@ -175,7 +176,8 @@ func worker(records int64, dbs *DBs, readers, id int, write bool) error {
 				}).ResultError()
 			}
 			if err != nil {
-				log.Fatal(err)
+				logger.Log("error", err)
+				os.Exit(1)
 			}
 			count++
 		}
